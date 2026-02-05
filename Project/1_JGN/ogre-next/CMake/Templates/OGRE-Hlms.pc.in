@@ -1,0 +1,11 @@
+prefix=@OGRE_PREFIX_PATH@
+exec_prefix=${prefix}
+libdir=${prefix}/@OGRE_LIB_DIRECTORY@
+includedir=${prefix}/include
+
+Name: @OGRE_NEXT_PREFIX@-Hlms
+Description: HLMS component for @OGRE_NEXT_PREFIX@
+Version: @OGRE_VERSION@
+Requires: @OGRE_NEXT_PREFIX@ = @OGRE_VERSION@
+Libs: -L${libdir} -l@OGRE_NEXT@HlmsPbs@OGRE_LIB_SUFFIX@ -l@OGRE_NEXT@HlmsUnlit@OGRE_LIB_SUFFIX@
+Cflags: -I${includedir}/@OGRE_NEXT_PREFIX@/Hlms/Common -I${includedir}/@OGRE_NEXT_PREFIX@/Hlms/Unlit -I${includedir}/@OGRE_NEXT_PREFIX@/Hlms/Pbs @OGRE_CFLAGS@

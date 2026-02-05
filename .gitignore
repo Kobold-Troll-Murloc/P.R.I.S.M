@@ -39,3 +39,14 @@
 
 # debug information files
 *.dwo
+
+# Build directories
+[Bb]uild/
+bin/
+obj/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.user
+CMakeCache.txt
+CMakeFiles/
