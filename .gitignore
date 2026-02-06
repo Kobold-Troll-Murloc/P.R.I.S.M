@@ -50,3 +50,5 @@ obj/
 *.user
 CMakeCache.txt
 CMakeFiles/
+Project/3_HSH/Vulkan_Particle/Vulkan_Particle/.vs/Vulkan_Particle/v17/ipch/AutoPCH/70bc3f48bd411fa3/VULKAN_PARTICLE.ipch
+Project/3_HSH/Vulkan_Particle/Vulkan_Particle/.vs/Vulkan_Particle/v17/ipch/AutoPCH/98f92b7cf2f44ba2/VULKAN_EX01.ipch

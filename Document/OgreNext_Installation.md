@@ -19,6 +19,9 @@ git clone --recurse-submodules --shallow-submodules https://github.com/OGRECave/
 git clone --branch master https://github.com/OGRECave/ogre-next.git
 ```
 
+수정된 버전을 1_JGN에서 가져가기(ogre-next, ogre-next-deps) (build는 ignore되어있음)
+
+
 ## 3. 의존성 라이브러리 빌드 (ogre-next-deps)
 
 ### 방법 A: CMake GUI 사용 (추천)
@@ -74,3 +77,51 @@ git clone --branch master https://github.com/OGRECave/ogre-next.git
 ## 💡 주요 팁
 *   **Vulkan 사용 시**: Python이 Path에 등록되어 있어야 `shaderc` 빌드 오류가 발생하지 않습니다.
 *   **자동화 스크립트**: `Scripts` 폴더 내의 `build_ogre_visual_studio.py` 등을 활용하면 더 간편하게 빌드할 수 있습니다.
+
+---
+
+## 7. 독립 프로젝트 구성 가이드 (P.R.I.S.M 프로젝트)
+
+기존 엔진 소스 코드와 분리된 본인만의 프로젝트를 구성하는 방법입니다.
+
+### 1) 권장 프로젝트 구조
+```text
+Project\1_JGN\P.R.I.S.M\
+├── CMakeLists.txt          # 빌드 설정 파일
+├── include\                # 헤더 파일 (.h, .hpp)
+├── src\                    # 소스 파일 (.cpp)
+└── bin\                    # 실행 바이너리 및 설정 파일
+    ├── plugins.cfg         # 렌더링 플러그인 설정
+    └── resources2.cfg      # 리소스 경로 설정
+```
+
+### 2) 핵심 프레임워크 활용
+OgreNext 샘플에서 제공하는 `Common` 프레임워크를 복사하여 사용하면 초기화 코드를 대폭 줄일 수 있습니다.
+*   **복사 위치**: `ogre-next\Samples\2.0\Common` 하위의 `include` 및 `src`
+*   **주요 클래스**: 
+    *   `GraphicsSystem`: 엔진 초기화 및 메인 루프 관리
+    *   `GameState`: 게임 씬 생성 및 이벤트 처리
+
+### 3) CMake 설정 (외부 연동)
+`CMakeLists.txt`에서 빌드된 엔진 경로를 수동으로 지정해 주어야 합니다.
+```cmake
+# 엔진 및 의존성 경로 설정
+set(OGRE_NEXT_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../ogre-next/build")
+set(OGRE_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../ogre-next-deps/build/ogredeps")
+
+# 헤더 경로 포함
+include_directories(
+    include
+    "${OGRE_NEXT_BUILD_DIR}/include"
+    "${OGRE_DEPS_DIR}/include/SDL2"
+    # ... 필요한 Ogre 컴포넌트 헤더 추가
+)
+
+# 라이브러리 링크
+link_directories("${OGRE_NEXT_BUILD_DIR}/lib/Release")
+target_link_libraries(MyProject OgreMain SDL2)
+```
+
+### 4) 실행 환경 세팅
+빌드 후 실행 시 `OgreMain.dll`, `SDL2.dll` 등의 라이브러리와 `plugins.cfg`, `resources2.cfg` 파일이 실행 파일(`.exe`)과 같은 위치에 있어야 합니다.
+*   `resources2.cfg` 내의 리소스 경로는 **절대 경로**로 작성하는 것이 초기 설정 시 디버깅에 유리합니다.
