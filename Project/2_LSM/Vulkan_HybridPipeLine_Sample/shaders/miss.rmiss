@@ -1,10 +1,14 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
 
-// payload location 1번은 그림자 여부를 담습니다.
-layout(location = 1) rayPayloadInEXT bool isShadowed;
+struct HitPayload {
+    vec3 color;
+    float hitT;
+};
+
+layout(location = 0) rayPayloadInEXT HitPayload payload;
 
 void main() {
-    // 아무것도 부딪히지 않음 = 그림자 없음 (빛 도달)
-    isShadowed = false;
+    payload.color = vec3(0.0); // 배경색 (검정)
+    payload.hitT = -1.0;       // 맞지 않음을 표시 (-1 또는 아주 큰 값)
 }

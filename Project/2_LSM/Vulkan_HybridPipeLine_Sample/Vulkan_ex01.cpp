@@ -284,6 +284,9 @@ private:
     std::vector<void*> rasterUniformBuffersMapped;
     // ------------------------------------
 
+    // [추가] 클래스 멤버 변수
+    VkSampler depthSampler;
+
 
     void initWindow() {
         glfwInit();
@@ -504,6 +507,8 @@ private:
         createDepthResources();      // Depth Buffer
         createRenderPass();          // Render Pass
 
+        createDepthSampler();
+
         // [추가] 래스터화 디스크립터 관련 초기화 (Graphics Pipeline 생성 전에 해야 함!)
         createRasterDescriptorSetLayout();
         createRasterUniformBuffers();
@@ -617,7 +622,7 @@ private:
 
         objects.push_back({
             "models/PiggyBank.obj",
-            glm::vec3(0.0f, 1.95f, 0.0f),
+            glm::vec3(9.0f, 1.95f, 0.0f),
             glm::vec3(0.0f, -30.0f, 0.0f),
             glm::vec3(0.6f, 0.6f, 0.6f),
             glm::vec3(1.0f, 0.4f, 0.2f),
@@ -644,17 +649,17 @@ private:
 
         lights.resize(2);
 
-        lights[0] = {
+        /*lights[0] = {
             glm::vec3(0.0f, 9.0f, 2.0f),
             1.2f,
             glm::vec3(1.0f, 1.0f, 1.0f),
             1
-        };
+        };*/
 
-        lights[1] = {
+        lights[0] = {
             glm::vec3(-8.0f, 5.0f, -5.0f),
             0.5f,
-            glm::vec3(1.0f, 0.5f, 0.2f),
+            glm::vec3(0.0f, 0.0f, 0.9f),
             1
         };
 
@@ -770,62 +775,146 @@ private:
         memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
     }
 
+    //void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+    //    VkCommandBufferBeginInfo beginInfo{};
+    //    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    //    if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+    //        throw std::runtime_error("failed to begin recording command buffer!");
+    //    }
+
+    //    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipeline);
+    //    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipelineLayout, 0, 1, &rtDescriptorSets[currentFrame], 0, nullptr);
+
+    //    auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
+    //    vkCmdTraceRaysKHR(commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, swapChainExtent.width, swapChainExtent.height, 1);
+
+    //    VkImageMemoryBarrier barrier1{};
+    //    barrier1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    //    barrier1.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    //    barrier1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    //    barrier1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier1.image = storageImage;
+    //    barrier1.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    //    barrier1.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    //    barrier1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    //    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier1);
+
+    //    VkImageMemoryBarrier barrier2{};
+    //    barrier2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    //    barrier2.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    //    barrier2.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    //    barrier2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier2.image = swapChainImages[imageIndex];
+    //    barrier2.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    //    barrier2.srcAccessMask = 0;
+    //    barrier2.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    //    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier2);
+
+    //    VkImageCopy copyRegion{};
+    //    copyRegion.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    //    copyRegion.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    //    copyRegion.extent = { swapChainExtent.width, swapChainExtent.height, 1 };
+    //    vkCmdCopyImage(commandBuffer, storageImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapChainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+    //    VkImageMemoryBarrier barrier3{};
+    //    barrier3.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    //    barrier3.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    //    barrier3.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    //    barrier3.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier3.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier3.image = swapChainImages[imageIndex];
+    //    barrier3.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    //    barrier3.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    //    barrier3.dstAccessMask = 0;
+    //    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier3);
+
+    //    // 6. [추가] 래스터화 렌더 패스 시작 (RT 이미지 위에 그리기)
+    //    VkRenderPassBeginInfo renderPassInfo{};
+    //    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    //    renderPassInfo.renderPass = renderPass;
+    //    renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
+    //    renderPassInfo.renderArea.offset = { 0, 0 };
+    //    renderPassInfo.renderArea.extent = swapChainExtent;
+
+    //    // ClearValues: Color는 Load하므로 필요 없지만 형식상 넣음, Depth는 Clear
+    //    std::array<VkClearValue, 2> clearValues{};
+    //    clearValues[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };
+    //    clearValues[1].depthStencil = { 1.0f, 0 };
+    //    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    //    renderPassInfo.pClearValues = clearValues.data();
+
+    //    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    //    // [중요] 그리기 명령 전에 반드시 파이프라인 바인딩!
+    //    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+
+    //    // 1. 카메라 정보(View/Proj) 바인딩
+    //    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &rasterDescriptorSets[currentFrame], 0, nullptr);
+
+    //    // 2. 모든 물체를 순회하며 isRaster인 것만 그림
+    //    for (size_t i = 0; i < objects.size(); i++) {
+    //        if (objects[i].isRaster) {
+    //            // (1) Vertex / Index Buffer 바인딩
+    //            // geometryDataList[i]에 해당 물체의 버퍼가 이미 생성되어 있음 (재사용)
+    //            VkBuffer vertexBuffers[] = { geometryDataList[i].vertexBuffer };
+    //            VkDeviceSize offsets[] = { 0 };
+    //            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+    //            vkCmdBindIndexBuffer(commandBuffer, geometryDataList[i].indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+    //            // (2) Model Matrix 계산 및 Push Constant 전달
+    //            RasterPushConstant pushConst{};
+    //            pushConst.model = glm::mat4(1.0f);
+    //            pushConst.model = glm::translate(pushConst.model, objects[i].position);
+    //            pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.x), glm::vec3(1, 0, 0));
+    //            pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.y), glm::vec3(0, 1, 0));
+    //            pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.z), glm::vec3(0, 0, 1));
+    //            pushConst.model = glm::scale(pushConst.model, objects[i].scale);
+    //            pushConst.color = objects[i].color;
+
+    //            vkCmdPushConstants(commandBuffer, graphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(RasterPushConstant), &pushConst);
+
+    //            // (3) 그리기 명령 (Draw Indexed)
+    //            vkCmdDrawIndexed(commandBuffer, geometryDataList[i].indexCount, 1, 0, 0, 0);
+    //        }
+    //    }
+
+    //    // 여기에 vkCmdBindVertexBuffers, vkCmdDrawIndexed 등을 사용하여
+    //    // 래스터화로 그릴 물체를 추가하면 됩니다.
+    //    // 예: vkCmdDraw(commandBuffer, 3, 1, 0, 0); // 삼각형 하나 그리기 테스트
+
+    //    vkCmdEndRenderPass(commandBuffer);
+
+    //    VkImageMemoryBarrier barrier4{};
+    //    barrier4.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    //    barrier4.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    //    barrier4.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    //    barrier4.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier4.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier4.image = storageImage;
+    //    barrier4.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    //    barrier4.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    //    barrier4.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    //    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0, nullptr, 0, nullptr, 1, &barrier4);
+
+    //    if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+    //        throw std::runtime_error("failed to record command buffer!");
+    //    }
+    //}
+
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
         if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
             throw std::runtime_error("failed to begin recording command buffer!");
         }
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipeline);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipelineLayout, 0, 1, &rtDescriptorSets[currentFrame], 0, nullptr);
+        // ==========================================================================================
+        // Phase 1: Rasterization Pass (G-Buffer/Depth 생성)
+        // ==========================================================================================
 
-        auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
-        vkCmdTraceRaysKHR(commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, swapChainExtent.width, swapChainExtent.height, 1);
-
-        VkImageMemoryBarrier barrier1{};
-        barrier1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier1.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        barrier1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier1.image = storageImage;
-        barrier1.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        barrier1.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier1);
-
-        VkImageMemoryBarrier barrier2{};
-        barrier2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier2.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier2.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier2.image = swapChainImages[imageIndex];
-        barrier2.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        barrier2.srcAccessMask = 0;
-        barrier2.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier2);
-
-        VkImageCopy copyRegion{};
-        copyRegion.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copyRegion.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copyRegion.extent = { swapChainExtent.width, swapChainExtent.height, 1 };
-        vkCmdCopyImage(commandBuffer, storageImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapChainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
-
-        VkImageMemoryBarrier barrier3{};
-        barrier3.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier3.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier3.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        barrier3.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier3.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier3.image = swapChainImages[imageIndex];
-        barrier3.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        barrier3.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier3.dstAccessMask = 0;
-        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier3);
-
-        // 6. [추가] 래스터화 렌더 패스 시작 (RT 이미지 위에 그리기)
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = renderPass;
@@ -833,32 +922,27 @@ private:
         renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = swapChainExtent;
 
-        // ClearValues: Color는 Load하므로 필요 없지만 형식상 넣음, Depth는 Clear
         std::array<VkClearValue, 2> clearValues{};
         clearValues[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };
         clearValues[1].depthStencil = { 1.0f, 0 };
+
         renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
         renderPassInfo.pClearValues = clearValues.data();
 
+        // 래스터화 시작
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-        // [중요] 그리기 명령 전에 반드시 파이프라인 바인딩!
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-
-        // 1. 카메라 정보(View/Proj) 바인딩
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &rasterDescriptorSets[currentFrame], 0, nullptr);
 
-        // 2. 모든 물체를 순회하며 isRaster인 것만 그림
+        // isRaster == true 인 물체만 그리기
         for (size_t i = 0; i < objects.size(); i++) {
             if (objects[i].isRaster) {
-                // (1) Vertex / Index Buffer 바인딩
-                // geometryDataList[i]에 해당 물체의 버퍼가 이미 생성되어 있음 (재사용)
                 VkBuffer vertexBuffers[] = { geometryDataList[i].vertexBuffer };
                 VkDeviceSize offsets[] = { 0 };
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
                 vkCmdBindIndexBuffer(commandBuffer, geometryDataList[i].indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-                // (2) Model Matrix 계산 및 Push Constant 전달
                 RasterPushConstant pushConst{};
                 pushConst.model = glm::mat4(1.0f);
                 pushConst.model = glm::translate(pushConst.model, objects[i].position);
@@ -869,29 +953,151 @@ private:
                 pushConst.color = objects[i].color;
 
                 vkCmdPushConstants(commandBuffer, graphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(RasterPushConstant), &pushConst);
-
-                // (3) 그리기 명령 (Draw Indexed)
                 vkCmdDrawIndexed(commandBuffer, geometryDataList[i].indexCount, 1, 0, 0, 0);
             }
         }
-
-        // 여기에 vkCmdBindVertexBuffers, vkCmdDrawIndexed 등을 사용하여
-        // 래스터화로 그릴 물체를 추가하면 됩니다.
-        // 예: vkCmdDraw(commandBuffer, 3, 1, 0, 0); // 삼각형 하나 그리기 테스트
-
         vkCmdEndRenderPass(commandBuffer);
 
-        VkImageMemoryBarrier barrier4{};
-        barrier4.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier4.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier4.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        barrier4.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier4.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier4.image = storageImage;
-        barrier4.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        barrier4.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barrier4.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0, nullptr, 0, nullptr, 1, &barrier4);
+        // ==========================================================================================
+        // Phase 2: Copy Background (Swapchain -> Storage Image)
+        // 래스터화된 결과를 RT 캔버스(Storage Image)로 복사해옵니다. (배경 합성용)
+        // ==========================================================================================
+
+        // 1. Swapchain: Present Src -> Transfer Src (복사 원본 준비)
+        VkImageMemoryBarrier swapChainReadBarrier{};
+        swapChainReadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        swapChainReadBarrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; // RenderPass 종료 후 상태
+        swapChainReadBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        swapChainReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapChainReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapChainReadBarrier.image = swapChainImages[imageIndex];
+        swapChainReadBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        swapChainReadBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        swapChainReadBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        // 2. Storage Image: Undefined -> Transfer Dst (복사 타겟 준비)
+        VkImageMemoryBarrier storageWriteBarrier{};
+        storageWriteBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        storageWriteBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        storageWriteBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        storageWriteBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        storageWriteBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        storageWriteBarrier.image = storageImage;
+        storageWriteBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        storageWriteBarrier.srcAccessMask = 0;
+        storageWriteBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        // 3. Depth Image: Depth Attach -> Shader Read (RT에서 읽기 준비)
+        VkImageMemoryBarrier depthBarrier{};
+        depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depthBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        depthBarrier.image = depthImage;
+        depthBarrier.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        VkImageMemoryBarrier preCopyBarriers[] = { swapChainReadBarrier, storageWriteBarrier, depthBarrier };
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 0, nullptr, 0, nullptr, 3, preCopyBarriers);
+
+        // [복사 실행] 래스터화된 화면을 Storage Image로 복사
+        VkImageCopy copyRegion{};
+        copyRegion.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copyRegion.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copyRegion.extent = { swapChainExtent.width, swapChainExtent.height, 1 };
+        vkCmdCopyImage(commandBuffer, swapChainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, storageImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+        // ==========================================================================================
+        // Phase 3: Ray Tracing Pass
+        // ==========================================================================================
+
+        // Storage Image: Transfer Dst -> General (RT 쉐이더 쓰기 준비)
+        VkImageMemoryBarrier storageGeneralBarrier{};
+        storageGeneralBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        storageGeneralBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        storageGeneralBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        storageGeneralBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        storageGeneralBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        storageGeneralBarrier.image = storageImage;
+        storageGeneralBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        storageGeneralBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        storageGeneralBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 0, nullptr, 0, nullptr, 1, &storageGeneralBarrier);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipelineLayout, 0, 1, &rtDescriptorSets[currentFrame], 0, nullptr);
+
+        auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
+        vkCmdTraceRaysKHR(commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, swapChainExtent.width, swapChainExtent.height, 1);
+
+        // ==========================================================================================
+        // Phase 4: Final Copy (Storage Image -> Swapchain)
+        // RT 결과(Storage)를 다시 화면(Swapchain)으로 복사
+        // ==========================================================================================
+
+        // 1. Storage Image: General -> Transfer Src
+        VkImageMemoryBarrier copySrcBarrier{};
+        copySrcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        copySrcBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        copySrcBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        copySrcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copySrcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copySrcBarrier.image = storageImage;
+        copySrcBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        copySrcBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        copySrcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        // 2. Swapchain: Transfer Src -> Transfer Dst (Phase 2에서 Src였음)
+        VkImageMemoryBarrier copyDstBarrier{};
+        copyDstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        copyDstBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; // 아까 배경 복사할 때 Src였음
+        copyDstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        copyDstBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copyDstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copyDstBarrier.image = swapChainImages[imageIndex];
+        copyDstBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        copyDstBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        copyDstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        VkImageMemoryBarrier postRTBarriers[] = { copySrcBarrier, copyDstBarrier };
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 2, postRTBarriers);
+
+        // 최종 복사 실행
+        vkCmdCopyImage(commandBuffer, storageImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapChainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+        // ==========================================================================================
+        // Phase 5: Present 준비
+        // ==========================================================================================
+
+        VkImageMemoryBarrier presentBarrier{};
+        presentBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        presentBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        presentBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        presentBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        presentBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        presentBarrier.image = swapChainImages[imageIndex];
+        presentBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        presentBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        presentBarrier.dstAccessMask = 0;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &presentBarrier);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to record command buffer!");
@@ -1064,7 +1270,9 @@ private:
         createInfo.imageColorSpace = surfaceFormat.colorSpace;
         createInfo.imageExtent = extent;
         createInfo.imageArrayLayers = 1;
-        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
         uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
@@ -1321,6 +1529,8 @@ private:
 
         std::vector<VkAccelerationStructureInstanceKHR> instances;
         for (size_t i = 0; i < objects.size(); i++) {
+            //if (objects[i].isRaster) continue;
+
             VkAccelerationStructureInstanceKHR instance{};
             glm::mat4 transform = glm::mat4(1.0f);
             transform = glm::translate(transform, objects[i].position);
@@ -1404,7 +1614,7 @@ private:
     }
 
     void createRTDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+        std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
         bindings[0].binding = 0;
         bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         bindings[0].descriptorCount = 1;
@@ -1430,6 +1640,14 @@ private:
         bindings[4].descriptorCount = 1;
         bindings[4].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
+        // [추가] Binding 5: Depth Sampler (Combined Image Sampler)
+        VkDescriptorSetLayoutBinding depthBinding{};
+        depthBinding.binding = 5;
+        depthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        depthBinding.descriptorCount = 1;
+        depthBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+        bindings[5] = depthBinding;
+
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -1441,7 +1659,7 @@ private:
     }
 
     void createRTDescriptorPool() {
-        std::array<VkDescriptorPoolSize, 5> poolSizes{};
+        std::array<VkDescriptorPoolSize, 6> poolSizes{};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         poolSizes[0].descriptorCount = MAX_FRAMES_IN_FLIGHT;
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1450,6 +1668,9 @@ private:
         poolSizes[2].descriptorCount = MAX_FRAMES_IN_FLIGHT;
         poolSizes[3] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT };
         poolSizes[4] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT };
+        
+        poolSizes[5].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[5].descriptorCount = MAX_FRAMES_IN_FLIGHT;
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1499,7 +1720,13 @@ private:
             objDescInfo.offset = 0;
             objDescInfo.range = VK_WHOLE_SIZE;
 
-            std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
+            // [추가] Depth Image Info 설정
+            VkDescriptorImageInfo depthImageInfo{};
+            depthImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; // 읽기 전용 레이아웃
+            depthImageInfo.imageView = depthImageView;
+            depthImageInfo.sampler = depthSampler;
+
+            std::array<VkWriteDescriptorSet, 6> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = rtDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -1535,6 +1762,16 @@ private:
             descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[4].descriptorCount = 1;
             descriptorWrites[4].pBufferInfo = &objDescInfo;
+
+            // [추가] Descriptor Write 설정
+            VkWriteDescriptorSet depthWrite{};
+            depthWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            depthWrite.dstSet = rtDescriptorSets[i];
+            depthWrite.dstBinding = 5;
+            depthWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            depthWrite.descriptorCount = 1;
+            depthWrite.pImageInfo = &depthImageInfo;
+            descriptorWrites[5] = depthWrite;
 
             vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
         }
@@ -2049,6 +2286,8 @@ private:
             vkFreeMemory(device, rasterUniformBuffersMemory[i], nullptr);
         }
 
+        vkDestroySampler(device, depthSampler, nullptr);
+
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vkDestroyBuffer(device, uniformBuffers[i], nullptr);
@@ -2102,8 +2341,10 @@ private:
     // [추가] 1. 깊이 버퍼(Depth Buffer) 생성
     void createDepthResources() {
         VkFormat depthFormat = findDepthFormat();
-        createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, 
-            VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 
+        // [수정] VK_IMAGE_USAGE_SAMPLED_BIT 추가
+        createImage(swapChainExtent.width, swapChainExtent.height, depthFormat,
+            VK_IMAGE_TILING_OPTIMAL,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
         
         VkImageViewCreateInfo viewInfo{};
@@ -2198,7 +2439,7 @@ private:
         depthAttachment.format = findDepthFormat();
         depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
         depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2507,6 +2748,27 @@ private:
         ubo.proj[1][1] *= -1; // Vulkan Y 좌표계 반전
 
         memcpy(rasterUniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+    }
+
+    // [추가] 초기화 함수 (initVulkan에서 호출 필요)
+    void createDepthSampler() {
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_NEAREST; // 깊이값은 보간하면 안 되므로 NEAREST
+        samplerInfo.minFilter = VK_FILTER_NEAREST;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.mipLodBias = 0.0f;
+        samplerInfo.maxAnisotropy = 1.0f;
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = 1.0f;
+        samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+
+        if (vkCreateSampler(device, &samplerInfo, nullptr, &depthSampler) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create texture sampler!");
+        }
     }
 
 

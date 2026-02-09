@@ -38,6 +38,12 @@ struct Vertex {
   float pad2; // C++와 동일하게 추가
 };
 
+// [수정] RayGen과 동일한 구조체 정의
+struct HitPayload {
+    vec3 color;
+    float hitT;
+};
+
 layout(buffer_reference, scalar) buffer Vertices { Vertex v[]; };
 layout(buffer_reference, scalar) buffer Indices { uint i[]; };
 
@@ -51,7 +57,8 @@ layout(set = 0, binding = 4, scalar) buffer ObjDescBuffer {
 } objDesc;
 
 // Ray Payloads
-layout(location = 0) rayPayloadInEXT vec3 hitValue;
+// layout(location = 0) rayPayloadInEXT vec3 hitValue;
+layout(location = 0) rayPayloadInEXT HitPayload payload; // vec3 hitValue 대체
 layout(location = 1) rayPayloadEXT bool isShadowed;
 
 hitAttributeEXT vec2 attribs;
@@ -122,5 +129,8 @@ void main() {
         finalColor += diffuse + specular;
     }
 
-    hitValue = ambient + finalColor;
+    // hitValue = ambient + finalColor;
+    // [수정] 결과 전달 방식 변경
+    payload.color = ambient + finalColor;
+    payload.hitT = gl_HitTEXT; // 현재 충돌 지점까지의 거리 전달 [cite: 16]
 }

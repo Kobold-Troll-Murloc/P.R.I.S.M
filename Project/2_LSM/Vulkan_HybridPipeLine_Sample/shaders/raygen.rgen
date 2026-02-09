@@ -4,59 +4,68 @@
 layout(set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
 layout(set = 0, binding = 1, rgba8) uniform image2D image;
 
-struct Light {
-    vec3 position;
-    float intensity;
-    vec3 color;
-    int enabled;
-};
+// [추가] C++에서 연결한 Depth Sampler (Binding 5)
+layout(set = 0, binding = 5) uniform sampler2D depthMap; 
 
+// ... (UBO, Light 구조체 등 기존 코드 동일) ...
 layout(set = 0, binding = 2, std140) uniform UniformBufferObject {
     mat4 viewInverse;
     mat4 projInverse;
     vec3 cameraPos;
-    float padding1;
-    Light lights[3];
-    int   lightCount;
-    float padding2[3];
+    // ...
 } ubo;
 
-// 공통 payload
-layout(location = 0) rayPayloadEXT vec3 hitValue;
-layout(location = 1) rayPayloadEXT bool isShadowed;
+// [수정] Payload를 구조체로 변경하여 '거리(hitT)' 정보를 받음
+struct HitPayload {
+    vec3 color;
+    float hitT; // 충돌 거리
+};
 
-vec3 generateRayDirection(vec2 ndc)
-{
-    vec4 clip  = vec4(ndc, 0.0, 1.0);
-    vec4 view  = ubo.projInverse * clip;
-    view      /= view.w;
-    vec4 world = ubo.viewInverse * vec4(view.xyz, 0.0);
-    return normalize(world.xyz);
-}
+layout(location = 0) rayPayloadEXT HitPayload payload; // vec3 hitValue -> HitPayload payload
+layout(location = 1) rayPayloadEXT bool isShadowed;
 
 void main()
 {
-    vec2 pixelCenter = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
-    vec2 uv          = pixelCenter / vec2(gl_LaunchSizeEXT.xy);
-    vec2 ndc         = uv * 2.0 - 1.0;
+    const vec2 pixelCenter = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    const vec2 inUV = pixelCenter / vec2(gl_LaunchSizeEXT.xy);
+    vec2 d = inUV * 2.0 - 1.0;
 
-    vec3 rayOrigin    = ubo.cameraPos;
-    vec3 rayDirection = generateRayDirection(ndc);
+    vec4 origin = ubo.viewInverse * vec4(0,0,0,1);
+    vec4 target = ubo.projInverse * vec4(d.x, d.y, 1, 1);
+    vec4 direction = ubo.viewInverse * vec4(normalize(target.xyz), 0);
 
-    hitValue   = vec3(0.0);
-    isShadowed = false; // 기본값
+    // 1. 래스터화된 깊이 정보 읽기
+    float zBuffer = texture(depthMap, inUV).r;
 
-    traceRayEXT(
-        topLevelAS,
-        gl_RayFlagsOpaqueEXT,
-        0xFF,
-        0, 0, 0,      // missIndex = 0 -> 환경광
-        rayOrigin,
-        0.001,
-        rayDirection,
-        1e16,
-        0
-    );
+    // 2. 래스터화된 픽셀의 월드 거리 계산 (간단한 근사)
+    // 깊이 버퍼가 1.0이면(초기값) 아주 멀리 있는 것
+    float rasterDist = 1e20; // 무한대
+    if(zBuffer < 1.0) {
+        // 깊이값(NDC)을 이용해 월드 좌표 복원 후 거리 계산
+        vec4 clipPos = vec4(d.x, d.y, zBuffer, 1.0);
+        vec4 viewPos = ubo.projInverse * clipPos;
+        viewPos /= viewPos.w;
+        vec4 worldPos = ubo.viewInverse * viewPos;
+        rasterDist = distance(origin.xyz, worldPos.xyz);
+    }
 
-    imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(hitValue, 1.0));
+    // 3. 레이 트레이싱 수행
+    payload.color = vec3(0.0);
+    payload.hitT = 0.0; // 초기화
+
+    traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, origin.xyz, 0.001, direction.xyz, 1e20, 0);
+
+    // 4. [핵심] 깊이 비교 (Depth Test)
+    // 레이가 무언가에 맞았고(hitT > 0), 그 거리가 래스터화된 벽보다 가깝다면 -> RT 그림
+    // 레이가 안 맞았거나, 래스터화된 벽이 더 가깝다면 -> 래스터화 그림 유지 (쓰기 건너뜀)
+    
+    // [기존 코드]
+    // if(payload.hitT > 0.0 && payload.hitT < rasterDist) { 
+
+    // [수정 코드] 깊이 값에 약간의 여유(0.01)를 둡니다.
+    // 즉, RT 결과가 래스터화된 벽보다 '최소 0.01만큼' 더 가까울 때만 그립니다.
+    if(payload.hitT > 0.0 && payload.hitT < rasterDist - 0.01) {
+        imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(payload.color, 1.0));
+    } 
+    // else: imageStore를 호출하지 않음으로써 기존 배경(래스터화 결과)을 보존
 }
