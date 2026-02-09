@@ -64,6 +64,11 @@ void main()
 
     // [수정 코드] 깊이 값에 약간의 여유(0.01)를 둡니다.
     // 즉, RT 결과가 래스터화된 벽보다 '최소 0.01만큼' 더 가까울 때만 그립니다.
+    // 기존코드는 이론상 rasterDist와 hitT는 같아야 하지만, 부동 소수점 정밀도 오차로 인해 미세하게 값이 달라집니다.
+    // RT가 이기는 경우 (hitT < rasterDist): RT 쉐이더가 실행되어 화면을 덮어씁니다. 이때 RT 쉐이더의 그림자 계산(traceRayEXT)에서 자기 자신을 가리는 Self-Shadowing(검은 점) 현상이 발생하여 검게 보입니다.
+    // Raster가 이기는 경우 (hitT >= rasterDist): RT가 그리지 않고, 원래의 빨간색 래스터 이미지가 남습니다.
+    // 이 두 경우가 픽셀마다 무작위로 번갈아 나타나면서 자글거리는 노이즈처럼 보이는 것입니다.
+    // 해결 방법: 깊이 편향(Depth Bias) 추가 / 레이 트레이싱이 래스터화된 결과(배경)를 덮어쓰려면, 물체가 확실히 더 앞에 있을 때만 그리도록 해야 합니다. 아주 미세한 차이는 무시하도록 **여유 값(Epsilon)**을 주어 해결할 수 있습니다.
     if(payload.hitT > 0.0 && payload.hitT < rasterDist - 0.01) {
         imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(payload.color, 1.0));
     } 
