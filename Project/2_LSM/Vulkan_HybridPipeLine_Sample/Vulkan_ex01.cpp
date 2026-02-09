@@ -649,14 +649,14 @@ private:
 
         lights.resize(2);
 
-        /*lights[0] = {
+        lights[0] = {
             glm::vec3(0.0f, 9.0f, 2.0f),
             1.2f,
             glm::vec3(1.0f, 1.0f, 1.0f),
             1
-        };*/
+        };
 
-        lights[0] = {
+        lights[1] = {
             glm::vec3(-8.0f, 5.0f, -5.0f),
             0.5f,
             glm::vec3(0.0f, 0.0f, 0.9f),
@@ -1529,7 +1529,7 @@ private:
 
         std::vector<VkAccelerationStructureInstanceKHR> instances;
         for (size_t i = 0; i < objects.size(); i++) {
-            //if (objects[i].isRaster) continue;
+            if (objects[i].isRaster) continue;
 
             VkAccelerationStructureInstanceKHR instance{};
             glm::mat4 transform = glm::mat4(1.0f);

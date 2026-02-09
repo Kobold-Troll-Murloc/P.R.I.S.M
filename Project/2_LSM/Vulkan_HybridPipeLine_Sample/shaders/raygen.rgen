@@ -49,6 +49,14 @@ void main()
         rasterDist = distance(origin.xyz, worldPos.xyz);
     }
 
+    // [핵심 최적화] 래스터 물체가 아주 가까이 있다면, 레이를 쏘지 않고 바로 종료!
+    // "여기는 이미 래스터화로 그렸으니, 값비싼 레이 트레이싱은 하지 마라"
+    if (rasterDist < 1000.0) { // 적절한 거리 임계값 (혹은 zBuffer < 1.0 체크)
+        // 아무것도 안 하고 함수 종료 -> 기존 래스터 이미지 유지됨
+        // GPU는 여기서 멈추므로 TraceRay 비용이 0이 됨!
+        return; 
+    }
+
     // 3. 레이 트레이싱 수행
     payload.color = vec3(0.0);
     payload.hitT = 0.0; // 초기화
