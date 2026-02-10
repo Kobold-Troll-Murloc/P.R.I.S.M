@@ -63,6 +63,7 @@ endforeach()
 set(SOURCE_FILES 
     Vulkan_ex01.cpp            # [중요] 작성한 메인 소스 코드 파일명
     tiny_obj_loader.h
+    VulkanProfiler.h
 )
 
 # 실행 파일 생성 (쉐이더 SPV 파일들을 의존성에 추가하여 자동 빌드 유도)

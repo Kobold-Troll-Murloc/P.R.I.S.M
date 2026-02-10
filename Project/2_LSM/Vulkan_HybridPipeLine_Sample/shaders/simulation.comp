@@ -1,0 +1,44 @@
+#version 450
+layout (local_size_x = 256) in;
+
+struct ObjectData {
+    mat4 model;
+    vec4 position;
+    vec4 velocity;
+    vec4 color;
+};
+
+layout(std140, binding = 0) buffer ObjectBuffer {
+    ObjectData objects[];
+};
+
+layout(push_constant) uniform PushConsts {
+    float deltaTime;
+    float time;
+    int objectCount;
+} push;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= push.objectCount) return;
+
+    vec3 pos = objects[idx].position.xyz;
+    vec3 vel = objects[idx].velocity.xyz;
+
+    // 간단한 이동
+    pos += vel * push.deltaTime;
+
+    // 경계 반사 (-10 ~ 10 박스)
+    if (pos.x > 10.0 || pos.x < -10.0) vel.x *= -1.0;
+    if (pos.y > 20.0 || pos.y < -5.0)  vel.y *= -1.0;
+    if (pos.z > 10.0 || pos.z < -10.0) vel.z *= -1.0;
+
+    objects[idx].position.xyz = pos;
+    objects[idx].velocity.xyz = vel;
+
+    // 모델 행렬 업데이트 (이동만 적용)
+    // 회전/스케일은 초기값을 유지하려면 복잡해지므로 여기선 Identity 기준 이동만 적용
+    mat4 m = mat4(1.0);
+    m[3] = vec4(pos, 1.0); // Translation
+    objects[idx].model = m;
+}

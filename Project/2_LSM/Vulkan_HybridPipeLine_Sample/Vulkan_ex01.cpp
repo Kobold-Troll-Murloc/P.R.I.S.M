@@ -13,6 +13,8 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 
+#include "VulkanProfiler.h"
+
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
@@ -172,6 +174,14 @@ struct GeometryData {
     VkDeviceMemory blasMemory;
 };
 
+// 쉐이더(GLSL)와 데이터 레이아웃을 맞추기 위한 구조체
+struct ObjState {
+    glm::mat4 model;    // 64 bytes
+    glm::vec4 position; // 16 bytes (xyz: pos, w: scale/padding)
+    glm::vec4 velocity; // 16 bytes (xyz: vel, w: padding)
+    glm::vec4 color;    // 16 bytes
+}; // Total: 112 bytes (align 맞춰짐)
+
 class RayTracedScene {
 public:
     void run() {
@@ -286,6 +296,28 @@ private:
 
     // [추가] 클래스 멤버 변수
     VkSampler depthSampler;
+
+
+    // -------- [프로파일링 관련] --------
+    VulkanProfiler profiler;
+    float titleUpdateTimer = 0.0f;
+    // ------------------------------------
+
+
+    // -------- [Compute 관련] --------
+
+    // Compute 관련 변수
+    VkPipeline computePipeline;
+    VkPipelineLayout computePipelineLayout;
+    VkDescriptorSetLayout computeDescriptorSetLayout;
+    VkDescriptorPool computeDescriptorPool;
+    VkDescriptorSet computeDescriptorSet;
+
+    // 시뮬레이션용 SSBO (모든 오브젝트 정보 저장)
+    VkBuffer objectSSBO;
+    VkDeviceMemory objectSSBOMemory;
+
+    // ------------------------------------
 
 
     void initWindow() {
@@ -494,45 +526,96 @@ private:
 
 
     void initVulkan() {
-        createInstance();
-        setupDebugMessenger();
-        createSurface();
-        pickPhysicalDevice();
-        createLogicalDevice();
-        createSwapChain();
-        createImageViews();
-        createCommandPool();
+        // =================================================================
+        // 1. Vulkan 기본 인프라 구축 (Base Infrastructure)
+        // =================================================================
+        // Vulkan을 사용하기 위한 가장 기초적인 객체들을 생성합니다.
+        createInstance();           // Vulkan 라이브러리 초기화 및 인스턴스 생성
+        setupDebugMessenger();      // 검증 레이어(Validation Layer) 로그 설정
+        createSurface();            // 윈도우(GLFW)와 Vulkan을 연결하는 표면 생성
+        pickPhysicalDevice();       // 그래픽 카드(GPU) 선택
+        createLogicalDevice();      // 논리적 장치 및 큐(Queue) 생성
+        createSwapChain();          // 화면 출력을 위한 이미지 버퍼 체인 생성
+        createImageViews();         // 스왑체인 이미지를 뷰(View) 형태로 래핑
+        createCommandPool();        // 명령 버퍼(Command Buffer)를 할당할 풀 생성
 
-        // --- [수정] 래스터화 리소스 생성 추가 ---
-        createDepthResources();      // Depth Buffer
-        createRenderPass();          // Render Pass
+        // =================================================================
+        // 2. 씬 데이터 로드 (Scene Data Loading) - [매우 중요]
+        // =================================================================
+        // 물체의 개수, 초기 위치 등을 CPU 메모리(vector)에 적재합니다.
+        // 이후 모든 버퍼(SSBO, AS 등)의 크기가 이 데이터에 의해 결정되므로 가장 먼저 해야 합니다.
+        setupScene();
 
-        createDepthSampler();
+        // =================================================================
+        // 3. 시뮬레이션 데이터 구축 (Compute & SSBO)
+        // =================================================================
+        // 물리 연산을 위한 데이터와 파이프라인을 만듭니다.
 
-        // [추가] 래스터화 디스크립터 관련 초기화 (Graphics Pipeline 생성 전에 해야 함!)
-        createRasterDescriptorSetLayout();
-        createRasterUniformBuffers();
-        createRasterDescriptorPool();
+        // [순서 중요] setupScene() 데이터로 SSBO(GPU 버퍼)를 먼저 만듭니다.
+        // 그래야 뒤에서 Raster/Compute 디스크립터 셋에 이 버퍼를 연결할 수 있습니다.
+        createObjectSSBO();
+
+        // Compute Shader 파이프라인 생성 (SSBO를 바인딩)
+        createComputePipeline();
+
+        // =================================================================
+        // 4. 래스터화 리소스 준비 (Rasterization Resources)
+        // =================================================================
+        // 화면에 1차적으로 물체를 그리기 위한 준비 단계입니다.
+
+        createDepthResources();     // 깊이 버퍼(Depth Buffer) 생성 (앞/뒤 구분용)
+        createDepthSampler();       // 깊이 버퍼를 나중에 RT에서 읽을 때 사용할 샘플러
+        createRenderPass();         // 그리기 작업의 흐름(첨부물 로드/저장 등) 정의
+        createFramebuffers();       // RenderPass와 이미지를 연결하는 프레임버퍼 생성
+
+        // =================================================================
+        // 5. 래스터화 파이프라인 및 디스크립터 (Raster Pipeline & Descriptors)
+        // =================================================================
+        // 쉐이더가 사용할 데이터(UBO, SSBO) 연결 고리를 만듭니다.
+
+        createRasterDescriptorSetLayout(); // 쉐이더 입력 구조 정의 (Binding 0: UBO, Binding 1: SSBO)
+        createGraphicsPipeline();          // 버텍스/프래그먼트 쉐이더 컴파일 및 파이프라인 생성
+
+        createRasterUniformBuffers();      // 카메라 정보(View/Proj) 담을 UBO 생성
+        createRasterDescriptorPool();      // 디스크립터 셋을 찍어낼 풀 생성
+
+        // [핵심 수정] 반드시 createObjectSSBO() 이후에 호출되어야 합니다!
+        // 이제 SSBO가 존재하므로, 안전하게 디스크립터 셋(Binding 1)에 연결할 수 있습니다.
         createRasterDescriptorSets();
 
-        createFramebuffers();        // Framebuffers
-        createGraphicsPipeline();    // Graphics Pipeline (Shaders)
-        // --------------------------------------
+        // =================================================================
+        // 6. 레이 트레이싱 리소스 준비 (Ray Tracing Resources)
+        // =================================================================
+        // 래스터화된 결과 위에 고품질 효과를 얹기 위한 준비입니다.
 
-        setupScene();
-        createInstanceColorBuffer();
-        createStorageImage();
-        createUniformBuffers();
-        createBottomLevelAS();
-        createObjDescriptionBuffer();
-        createTopLevelAS();
-        createRTDescriptorSetLayout();
-        createRTDescriptorPool();
-        createRTDescriptorSets();
-        createRTPipeline();
-        createShaderBindingTable();
-        createCommandBuffers();
-        createSyncObjects();
+        createInstanceColorBuffer();       // RT에서 쓸 색상 정보 버퍼
+        createStorageImage();              // RT 결과를 저장할 이미지 (캔버스)
+        createUniformBuffers();            // RT용 카메라/조명 정보 UBO
+        createBottomLevelAS();             // 모델 형상 가속 구조 (BLAS) 빌드
+        createObjDescriptionBuffer();      // 버텍스/인덱스 버퍼 주소 정보
+        createTopLevelAS();                // 인스턴스 배치 가속 구조 (TLAS) 빌드
+
+        // =================================================================
+        // 7. 레이 트레이싱 파이프라인 (Ray Tracing Pipeline)
+        // =================================================================
+        createRTDescriptorSetLayout();     // RT 쉐이더 입력 구조 정의
+        createRTDescriptorPool();          // RT용 디스크립터 풀
+        createRTDescriptorSets();          // 리소스(AS, StorageImage, 등) 연결
+        createRTPipeline();                // RayGen, Miss, Hit 쉐이더 파이프라인 생성
+        createShaderBindingTable();        // 쉐이더 함수 포인터 테이블(SBT) 생성
+
+        // =================================================================
+        // 8. 실행 명령 녹화 및 동기화 (Recording & Sync)
+        // =================================================================
+        // 실제 GPU가 수행할 작업을 기록합니다.
+        createCommandBuffers();            // Compute -> Raster -> RT 순서로 명령 녹화
+        createSyncObjects();               // 세마포어 및 펜스 생성 (GPU-CPU 동기화)
+
+        // =================================================================
+        // 9. 디버깅 및 도구 (Tools)
+        // =================================================================
+        // 프로파일러 초기화 (Query Pool 생성 등) - Device 생성 이후여야 함
+        profiler.init(device, physicalDevice);
     }
 
     /*void setupScene() {
@@ -557,7 +640,7 @@ private:
             glm::vec3(0.0f, 0.0f, 0.0f),
             glm::vec3(20.0f, 0.1f, 20.0f),
             glm::vec3(0.8f, 0.8f, 0.8f)
-            ,true
+            ,false
             });
 
         objects.push_back({
@@ -566,7 +649,7 @@ private:
             glm::vec3(0.0f),
             glm::vec3(20.0f, 0.1f, 20.0f),
             glm::vec3(1.0f, 1.0f, 1.0f)
-            ,true
+            ,false
             });
 
 
@@ -585,7 +668,8 @@ private:
             glm::vec3(-10.0f, 6.0f, 0.0f),
             glm::vec3(0.0f),
             glm::vec3(0.1f, 10.0f, 20.0f),
-            glm::vec3(0.8f, 0.1f, 0.1f)
+            glm::vec3(0.8f, 0.1f, 0.1f),
+            false
             });
 
         objects.push_back({
@@ -593,7 +677,8 @@ private:
             glm::vec3(10.0f, 6.0f, 0.0f),
             glm::vec3(0.0f),
             glm::vec3(0.1f, 10.0f, 20.0f),
-            glm::vec3(0.1f, 0.8f, 0.1f)
+            glm::vec3(0.1f, 0.8f, 0.1f),
+            false
             });
 
         objects.push_back({
@@ -601,7 +686,8 @@ private:
             glm::vec3(0.0f, -0.9f, 0.0f),
             glm::vec3(0.0f, 0.0f, 0.0f),
             glm::vec3(0.5f, 0.5f, 0.5f),
-            glm::vec3(0.55f, 0.27f, 0.07f)
+            glm::vec3(0.55f, 0.27f, 0.07f),
+            false
             });
 
         objects.push_back({
@@ -609,7 +695,8 @@ private:
             glm::vec3(0.0f, -0.9f, 2.5f),
             glm::vec3(0.0f, 180.0f, 0.0f),
             glm::vec3(0.6f, 0.6f, 0.6f),
-            glm::vec3(0.2f, 0.2f, 0.6f)
+            glm::vec3(0.2f, 0.2f, 0.6f),
+            false
             });
 
         objects.push_back({
@@ -617,7 +704,8 @@ private:
             glm::vec3(-3.5f, -0.9f, 0.0f),
             glm::vec3(0.0f, -70.0f, 0.0f),
             glm::vec3(0.6f, 0.6f, 0.6f),
-            glm::vec3(0.2f, 0.2f, 0.6f)
+            glm::vec3(0.2f, 0.2f, 0.6f),
+            false
             });
 
         objects.push_back({
@@ -626,7 +714,7 @@ private:
             glm::vec3(0.0f, -30.0f, 0.0f),
             glm::vec3(0.6f, 0.6f, 0.6f),
             glm::vec3(1.0f, 0.4f, 0.2f),
-            false
+            true
             });
 
         objects.push_back({
@@ -750,6 +838,20 @@ private:
         else if (result != VK_SUCCESS) {
             throw std::runtime_error("failed to present swap chain image!");
         }
+
+        // [추가] 6. 결과 확인 및 윈도우 타이틀 업데이트 (0.5초마다)
+        titleUpdateTimer += deltaTime; // deltaTime은 mainLoop에서 계산됨
+        if (titleUpdateTimer > 0.5f) {
+            std::string stats = profiler.getResultsString();
+
+            if (!stats.empty()) {
+                std::string title = "P.R.I.S.M Hybrid Renderer - " + stats;
+                glfwSetWindowTitle(window, title.c_str());
+            }
+            titleUpdateTimer = 0.0f;
+        }
+
+
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
@@ -775,133 +877,6 @@ private:
         memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
     }
 
-    //void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
-    //    VkCommandBufferBeginInfo beginInfo{};
-    //    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    //    if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-    //        throw std::runtime_error("failed to begin recording command buffer!");
-    //    }
-
-    //    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipeline);
-    //    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipelineLayout, 0, 1, &rtDescriptorSets[currentFrame], 0, nullptr);
-
-    //    auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
-    //    vkCmdTraceRaysKHR(commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, swapChainExtent.width, swapChainExtent.height, 1);
-
-    //    VkImageMemoryBarrier barrier1{};
-    //    barrier1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    //    barrier1.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    //    barrier1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    //    barrier1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //    barrier1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //    barrier1.image = storageImage;
-    //    barrier1.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    //    barrier1.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    //    barrier1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    //    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier1);
-
-    //    VkImageMemoryBarrier barrier2{};
-    //    barrier2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    //    barrier2.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    //    barrier2.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    //    barrier2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //    barrier2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //    barrier2.image = swapChainImages[imageIndex];
-    //    barrier2.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    //    barrier2.srcAccessMask = 0;
-    //    barrier2.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    //    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier2);
-
-    //    VkImageCopy copyRegion{};
-    //    copyRegion.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    //    copyRegion.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    //    copyRegion.extent = { swapChainExtent.width, swapChainExtent.height, 1 };
-    //    vkCmdCopyImage(commandBuffer, storageImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapChainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
-
-    //    VkImageMemoryBarrier barrier3{};
-    //    barrier3.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    //    barrier3.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    //    barrier3.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    //    barrier3.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //    barrier3.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //    barrier3.image = swapChainImages[imageIndex];
-    //    barrier3.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    //    barrier3.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    //    barrier3.dstAccessMask = 0;
-    //    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier3);
-
-    //    // 6. [추가] 래스터화 렌더 패스 시작 (RT 이미지 위에 그리기)
-    //    VkRenderPassBeginInfo renderPassInfo{};
-    //    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    //    renderPassInfo.renderPass = renderPass;
-    //    renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
-    //    renderPassInfo.renderArea.offset = { 0, 0 };
-    //    renderPassInfo.renderArea.extent = swapChainExtent;
-
-    //    // ClearValues: Color는 Load하므로 필요 없지만 형식상 넣음, Depth는 Clear
-    //    std::array<VkClearValue, 2> clearValues{};
-    //    clearValues[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };
-    //    clearValues[1].depthStencil = { 1.0f, 0 };
-    //    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-    //    renderPassInfo.pClearValues = clearValues.data();
-
-    //    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-    //    // [중요] 그리기 명령 전에 반드시 파이프라인 바인딩!
-    //    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-
-    //    // 1. 카메라 정보(View/Proj) 바인딩
-    //    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &rasterDescriptorSets[currentFrame], 0, nullptr);
-
-    //    // 2. 모든 물체를 순회하며 isRaster인 것만 그림
-    //    for (size_t i = 0; i < objects.size(); i++) {
-    //        if (objects[i].isRaster) {
-    //            // (1) Vertex / Index Buffer 바인딩
-    //            // geometryDataList[i]에 해당 물체의 버퍼가 이미 생성되어 있음 (재사용)
-    //            VkBuffer vertexBuffers[] = { geometryDataList[i].vertexBuffer };
-    //            VkDeviceSize offsets[] = { 0 };
-    //            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-    //            vkCmdBindIndexBuffer(commandBuffer, geometryDataList[i].indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-    //            // (2) Model Matrix 계산 및 Push Constant 전달
-    //            RasterPushConstant pushConst{};
-    //            pushConst.model = glm::mat4(1.0f);
-    //            pushConst.model = glm::translate(pushConst.model, objects[i].position);
-    //            pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.x), glm::vec3(1, 0, 0));
-    //            pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.y), glm::vec3(0, 1, 0));
-    //            pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.z), glm::vec3(0, 0, 1));
-    //            pushConst.model = glm::scale(pushConst.model, objects[i].scale);
-    //            pushConst.color = objects[i].color;
-
-    //            vkCmdPushConstants(commandBuffer, graphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(RasterPushConstant), &pushConst);
-
-    //            // (3) 그리기 명령 (Draw Indexed)
-    //            vkCmdDrawIndexed(commandBuffer, geometryDataList[i].indexCount, 1, 0, 0, 0);
-    //        }
-    //    }
-
-    //    // 여기에 vkCmdBindVertexBuffers, vkCmdDrawIndexed 등을 사용하여
-    //    // 래스터화로 그릴 물체를 추가하면 됩니다.
-    //    // 예: vkCmdDraw(commandBuffer, 3, 1, 0, 0); // 삼각형 하나 그리기 테스트
-
-    //    vkCmdEndRenderPass(commandBuffer);
-
-    //    VkImageMemoryBarrier barrier4{};
-    //    barrier4.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    //    barrier4.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    //    barrier4.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    //    barrier4.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //    barrier4.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //    barrier4.image = storageImage;
-    //    barrier4.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    //    barrier4.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    //    barrier4.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    //    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0, nullptr, 0, nullptr, 1, &barrier4);
-
-    //    if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
-    //        throw std::runtime_error("failed to record command buffer!");
-    //    }
-    //}
 
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
         VkCommandBufferBeginInfo beginInfo{};
@@ -911,9 +886,53 @@ private:
             throw std::runtime_error("failed to begin recording command buffer!");
         }
 
+        // [추가] 5-1. 프레임 측정 시작
+        profiler.beginFrame(commandBuffer);
+
+        // ==========================================================================================
+        // Phase 0: Compute Simulation (물리 연산) - 가장 먼저 실행!
+        // ==========================================================================================
+        profiler.beginSection(commandBuffer, "0. Compute Sim");
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
+
+        struct ComputePush { float dt; float time; int count; } push;
+        push.dt = 0.016f; // deltaTime (임시 고정값, 실제로는 mainLoop에서 받은 deltaTime 사용 권장)
+        push.time = (float)glfwGetTime();
+        push.count = (int)objects.size();
+
+        vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+
+        // 워크그룹 계산: (개수 + 255) / 256
+        vkCmdDispatch(commandBuffer, (uint32_t)(objects.size() + 255) / 256, 1, 1);
+
+        profiler.endSection(commandBuffer);
+
+        // [중요] Memory Barrier: Compute(쓰기) -> Vertex/RT(읽기) 동기화
+        VkBufferMemoryBarrier computeBarrier{};
+        computeBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        computeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; // Compute가 씀
+        computeBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR; // Vertex/RT가 읽음
+        computeBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        computeBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        computeBarrier.buffer = objectSSBO;
+        computeBarrier.offset = 0;
+        computeBarrier.size = VK_WHOLE_SIZE;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // 소스 단계
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, // 목적 단계
+            0, 0, nullptr,
+            1, &computeBarrier,
+            0, nullptr);
+
         // ==========================================================================================
         // Phase 1: Rasterization Pass (G-Buffer/Depth 생성)
         // ==========================================================================================
+
+        // [추가] 5-2. 래스터화 구간 시작
+        profiler.beginSection(commandBuffer, "1. Raster");
 
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -957,6 +976,9 @@ private:
             }
         }
         vkCmdEndRenderPass(commandBuffer);
+
+        // [추가] 5-3. 래스터화 구간 종료
+        profiler.endSection(commandBuffer);
 
         // ==========================================================================================
         // Phase 2: Copy Background (Swapchain -> Storage Image)
@@ -1017,6 +1039,9 @@ private:
         // Phase 3: Ray Tracing Pass
         // ==========================================================================================
 
+        // [추가] 5-4. 레이 트레이싱 구간 시작
+        profiler.beginSection(commandBuffer, "2. RayTrace");
+
         // Storage Image: Transfer Dst -> General (RT 쉐이더 쓰기 준비)
         VkImageMemoryBarrier storageGeneralBarrier{};
         storageGeneralBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1039,6 +1064,11 @@ private:
 
         auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
         vkCmdTraceRaysKHR(commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, swapChainExtent.width, swapChainExtent.height, 1);
+
+
+        // [추가] 5-5. 레이 트레이싱 구간 종료
+        profiler.endSection(commandBuffer);
+
 
         // ==========================================================================================
         // Phase 4: Final Copy (Storage Image -> Swapchain)
@@ -1343,7 +1373,7 @@ private:
         imageInfo.format = swapChainImageFormat;
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -2267,6 +2297,9 @@ private:
     }
 
     void cleanup() {
+        // [추가] 4. 프로파일러 정리
+        profiler.cleanup();
+
         cleanupSwapChain();
 
         // --- [수정] 래스터화 리소스 해제 추가 ---
@@ -2671,16 +2704,24 @@ private:
 
     // [추가] 래스터화용 디스크립터 셋 레이아웃 생성 (UBO: View/Proj)
     void createRasterDescriptorSetLayout() {
-        VkDescriptorSetLayoutBinding uboLayoutBinding{};
-        uboLayoutBinding.binding = 0;
-        uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        uboLayoutBinding.descriptorCount = 1;
-        uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        std::vector<VkDescriptorSetLayoutBinding> bindings(2); // 1개 -> 2개로 변경
+
+        // Binding 0: Raster UBO (View, Proj)
+        bindings[0].binding = 0;
+        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        // [추가] Binding 1: Object SSBO (Compute가 업데이트한 위치 정보)
+        bindings[1].binding = 1;
+        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT; // 버텍스 쉐이더에서 읽음
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = 1;
-        layoutInfo.pBindings = &uboLayoutBinding;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
 
         if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &rasterDescriptorSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create raster descriptor set layout!");
@@ -2703,14 +2744,20 @@ private:
 
     // [추가] 래스터화용 디스크립터 풀 생성
     void createRasterDescriptorPool() {
-        VkDescriptorPoolSize poolSize{};
-        poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        std::array<VkDescriptorPoolSize, 2> poolSizes{};
+
+        // 1. Uniform Buffer (기존)
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+        // 2. Storage Buffer (추가)
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+        poolInfo.pPoolSizes = poolSizes.data();
         poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &rasterDescriptorPool) != VK_SUCCESS) {
@@ -2733,21 +2780,37 @@ private:
         }
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            VkDescriptorBufferInfo bufferInfo{};
-            bufferInfo.buffer = rasterUniformBuffers[i];
-            bufferInfo.offset = 0;
-            bufferInfo.range = sizeof(RasterUBO);
+            // 1. UBO 정보 (Binding 0)
+            VkDescriptorBufferInfo uboInfo{};
+            uboInfo.buffer = rasterUniformBuffers[i];
+            uboInfo.offset = 0;
+            uboInfo.range = sizeof(RasterUBO);
 
-            VkWriteDescriptorSet descriptorWrite{};
-            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrite.dstSet = rasterDescriptorSets[i];
-            descriptorWrite.dstBinding = 0;
-            descriptorWrite.dstArrayElement = 0;
-            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrite.descriptorCount = 1;
-            descriptorWrite.pBufferInfo = &bufferInfo;
+            // 2. SSBO 정보 (Binding 1) - [추가]
+            VkDescriptorBufferInfo ssboInfo{};
+            ssboInfo.buffer = objectSSBO; // Compute가 쓰는 그 버퍼!
+            ssboInfo.offset = 0;
+            ssboInfo.range = VK_WHOLE_SIZE;
 
-            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+
+            // Binding 0 쓰기
+            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[0].dstSet = rasterDescriptorSets[i];
+            descriptorWrites[0].dstBinding = 0;
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrites[0].descriptorCount = 1;
+            descriptorWrites[0].pBufferInfo = &uboInfo;
+
+            // Binding 1 쓰기 (SSBO 연결)
+            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[1].dstSet = rasterDescriptorSets[i];
+            descriptorWrites[1].dstBinding = 1; // 쉐이더의 binding = 1 과 일치
+            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].pBufferInfo = &ssboInfo;
+
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
         }
     }
 
@@ -2780,6 +2843,172 @@ private:
         if (vkCreateSampler(device, &samplerInfo, nullptr, &depthSampler) != VK_SUCCESS) {
             throw std::runtime_error("failed to create texture sampler!");
         }
+    }
+
+    
+    void createObjectSSBO() {
+        VkDeviceSize bufferSize = sizeof(ObjState) * objects.size();
+
+        // 1. Staging Buffer 생성 (CPU에서 데이터를 만들어서 잠깐 담을 곳)
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer, stagingBufferMemory);
+
+        // 2. 초기 데이터 생성 (램덤 속도 부여 등)
+        std::vector<ObjState> initialStates(objects.size());
+        for (size_t i = 0; i < objects.size(); i++) {
+            initialStates[i].model = glm::mat4(1.0f);
+
+            // 기존 setupScene에서 설정한 위치를 가져옴
+            initialStates[i].model = glm::translate(glm::mat4(1.0f), objects[i].position);
+            initialStates[i].model = glm::scale(initialStates[i].model, objects[i].scale);
+            // 회전은 복잡하니 일단 생략하거나 초기값 적용
+
+            initialStates[i].position = glm::vec4(objects[i].position, 1.0f);
+
+            // 랜덤 속도 부여 (예: -2.0 ~ 2.0 사이)
+            float vx = ((rand() % 100) / 25.0f) - 2.0f;
+            float vy = ((rand() % 100) / 25.0f) - 2.0f;
+            float vz = ((rand() % 100) / 25.0f) - 2.0f;
+            initialStates[i].velocity = glm::vec4(vx, vy, vz, 0.0f);
+
+            initialStates[i].color = glm::vec4(objects[i].color, 1.0f);
+        }
+
+        // 3. 데이터 복사 (Map -> Memcpy -> Unmap)
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, initialStates.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // 4. 실제 SSBO 생성 (GPU 전용 메모리)
+        // 용도: Compute가 쓰고(STORAGE), Vertex가 읽고(STORAGE or VERTEX), 전송받음(TRANSFER_DST)
+        createBuffer(bufferSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            objectSSBO, objectSSBOMemory);
+
+        // 5. Staging -> SSBO 복사 명령 실행
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+        VkBufferCopy copyRegion{};
+        copyRegion.size = bufferSize;
+        vkCmdCopyBuffer(commandBuffer, stagingBuffer, objectSSBO, 1, &copyRegion);
+        endSingleTimeCommands(commandBuffer);
+
+        // 6. Staging Buffer 제거
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        std::cout << "Created Object SSBO for " << objects.size() << " objects." << std::endl;
+    }
+
+    void createComputePipeline() {
+        // =================================================================
+        // 1. Descriptor Set Layout (SSBO 바인딩 0번)
+        // =================================================================
+        VkDescriptorSetLayoutBinding ssboBinding{};
+        ssboBinding.binding = 0;
+        ssboBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        ssboBinding.descriptorCount = 1;
+        // Compute 뿐만 아니라 Vertex(Raster), RayTracing(ClosestHit)에서도 읽을 수 있게 공유
+        ssboBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 1;
+        layoutInfo.pBindings = &ssboBinding;
+
+        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &computeDescriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute descriptor set layout!");
+        }
+
+        // =================================================================
+        // 2. Pipeline Layout (Push Constant: dt, time, count)
+        // =================================================================
+        VkPushConstantRange pushConstant{};
+        pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pushConstant.offset = 0;
+        pushConstant.size = sizeof(float) * 2 + sizeof(int); // 12 bytes
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 1;
+        pipelineLayoutInfo.pSetLayouts = &computeDescriptorSetLayout;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstant;
+
+        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &computePipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute pipeline layout!");
+        }
+
+        // =================================================================
+        // 3. Compute Pipeline 생성
+        // =================================================================
+        auto computeShaderCode = readFile("shaders/simulation.comp.spv"); // 쉐이더 파일 필요
+        VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
+
+        VkPipelineShaderStageCreateInfo shaderStageInfo{};
+        shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        shaderStageInfo.module = computeShaderModule;
+        shaderStageInfo.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = shaderStageInfo;
+        pipelineInfo.layout = computePipelineLayout;
+
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute pipeline!");
+        }
+
+        vkDestroyShaderModule(device, computeShaderModule, nullptr);
+
+        // =================================================================
+        // 4. Descriptor Pool & Set 할당 및 업데이트
+        // =================================================================
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSize.descriptorCount = 1;
+
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.maxSets = 1;
+
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &computeDescriptorPool) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute descriptor pool!");
+        }
+
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = computeDescriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &computeDescriptorSetLayout;
+
+        if (vkAllocateDescriptorSets(device, &allocInfo, &computeDescriptorSet) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate compute descriptor set!");
+        }
+
+        // SSBO 연결
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = objectSSBO;
+        bufferInfo.offset = 0;
+        bufferInfo.range = VK_WHOLE_SIZE;
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = computeDescriptorSet;
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pBufferInfo = &bufferInfo;
+
+        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
     }
 
 
