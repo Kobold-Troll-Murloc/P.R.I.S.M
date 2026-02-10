@@ -1,15 +1,28 @@
 #version 450
 layout (local_size_x = 256) in;
 
+// Binding 0: 내 위치/속도 정보 (Raster/Physics용)
 struct ObjectData {
     mat4 model;
     vec4 position;
     vec4 velocity;
     vec4 color;
 };
-
 layout(std140, binding = 0) buffer ObjectBuffer {
     ObjectData objects[];
+};
+
+// [추가] Binding 1: TLAS Instance 구조체 (RT용)
+// Vulkan 사양에 맞춘 구조체 정의 (총 64바이트)
+struct VkAccelerationStructureInstanceKHR {
+    vec4 transform[3]; // 3x4 Row-Major Transform Matrix (float 12개)
+    uint instanceCustomIndex_and_mask; // 24비트 ID + 8비트 Mask
+    uint instanceShaderBindingTableRecordOffset_and_flags;
+    uint accelerationStructureReference_low;
+    uint accelerationStructureReference_high;
+};
+layout(std430, binding = 1) buffer InstanceBuffer {
+    VkAccelerationStructureInstanceKHR instances[];
 };
 
 layout(push_constant) uniform PushConsts {
@@ -22,23 +35,42 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= push.objectCount) return;
 
+    // [핵심] 정적 물체(Static)인지 확인
+    float isDynamic = objects[idx].velocity.w;
+    
+    // 만약 0.5보다 작다면(0.0이라면) 움직이지 않는 물체이므로 바로 종료
+    // (TLAS Instance Buffer 업데이트도 필요 없음 - 이미 초기값이 들어가 있음)
+    if (isDynamic < 0.5) {
+        return; 
+    }
+
+    // 1. 물리 시뮬레이션
     vec3 pos = objects[idx].position.xyz;
     vec3 vel = objects[idx].velocity.xyz;
 
-    // 간단한 이동
     pos += vel * push.deltaTime;
 
-    // 경계 반사 (-10 ~ 10 박스)
+    // 벽 튕기기 (-10 ~ 10)
     if (pos.x > 10.0 || pos.x < -10.0) vel.x *= -1.0;
     if (pos.y > 20.0 || pos.y < -5.0)  vel.y *= -1.0;
     if (pos.z > 10.0 || pos.z < -10.0) vel.z *= -1.0;
 
+    // SSBO 업데이트
     objects[idx].position.xyz = pos;
     objects[idx].velocity.xyz = vel;
 
-    // 모델 행렬 업데이트 (이동만 적용)
-    // 회전/스케일은 초기값을 유지하려면 복잡해지므로 여기선 Identity 기준 이동만 적용
+    // 모델 행렬 생성 (이동만 적용)
     mat4 m = mat4(1.0);
-    m[3] = vec4(pos, 1.0); // Translation
+    m[3] = vec4(pos, 1.0);
     objects[idx].model = m;
+
+    // 2. [핵심] TLAS Instance Buffer 업데이트
+    // GLSL mat4 (Column-Major) -> Vulkan Transform (Row-Major 3x4) 변환
+    // 전치(Transpose)를 해야 Row-Major 순서가 됩니다.
+    mat4 trans = transpose(m);
+
+    // 3개의 행(Row)을 차례대로 저장
+    instances[idx].transform[0] = trans[0]; // 1행 (Xx, Xy, Xz, Tx)
+    instances[idx].transform[1] = trans[1]; // 2행 (Yx, Yy, Yz, Ty)
+    instances[idx].transform[2] = trans[2]; // 3행 (Zx, Zy, Zz, Tz)
 }

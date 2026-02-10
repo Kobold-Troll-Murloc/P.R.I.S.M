@@ -121,6 +121,7 @@ struct ObjectInstance {
     glm::vec3 scale;
     glm::vec3 color;
     bool isRaster = false; // true면 래스터화로, false면 레이트레이싱으로 (혹은 둘다)
+    bool isDynamic = false; // [추가] true면 Compute Shader가 이동시킴, false면 고정
 };
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
@@ -318,6 +319,13 @@ private:
     VkDeviceMemory objectSSBOMemory;
 
     // ------------------------------------
+
+
+    // [추가] TLAS 빌드용 스크래치 버퍼 (매 프레임 재사용)
+    VkBuffer tlasScratchBuffer;
+    VkDeviceMemory tlasScratchBufferMemory;
+    VkDeviceAddress tlasScratchBufferAddress;
+
 
 
     void initWindow() {
@@ -526,95 +534,71 @@ private:
 
 
     void initVulkan() {
-        // =================================================================
-        // 1. Vulkan 기본 인프라 구축 (Base Infrastructure)
-        // =================================================================
-        // Vulkan을 사용하기 위한 가장 기초적인 객체들을 생성합니다.
-        createInstance();           // Vulkan 라이브러리 초기화 및 인스턴스 생성
-        setupDebugMessenger();      // 검증 레이어(Validation Layer) 로그 설정
-        createSurface();            // 윈도우(GLFW)와 Vulkan을 연결하는 표면 생성
-        pickPhysicalDevice();       // 그래픽 카드(GPU) 선택
-        createLogicalDevice();      // 논리적 장치 및 큐(Queue) 생성
-        createSwapChain();          // 화면 출력을 위한 이미지 버퍼 체인 생성
-        createImageViews();         // 스왑체인 이미지를 뷰(View) 형태로 래핑
-        createCommandPool();        // 명령 버퍼(Command Buffer)를 할당할 풀 생성
+        // 1. 기초 공사
+        createInstance();
+        setupDebugMessenger();
+        createSurface();
+        pickPhysicalDevice();
+        createLogicalDevice();
+        createSwapChain();
+        createImageViews();
+        createCommandPool();
 
-        // =================================================================
-        // 2. 씬 데이터 로드 (Scene Data Loading) - [매우 중요]
-        // =================================================================
-        // 물체의 개수, 초기 위치 등을 CPU 메모리(vector)에 적재합니다.
-        // 이후 모든 버퍼(SSBO, AS 등)의 크기가 이 데이터에 의해 결정되므로 가장 먼저 해야 합니다.
+        // 2. 렌더링 리소스 (RenderPass, Depth)
+        createDepthResources();
+        createRenderPass();
+        createDepthSampler();
+        createFramebuffers();
+
+        // =========================================================
+        // [중요] 3. 데이터 및 버퍼 생성 (가장 먼저 해야 함!)
+        // =========================================================
+
+        // 3-1. CPU 데이터 로드
         setupScene();
 
-        // =================================================================
-        // 3. 시뮬레이션 데이터 구축 (Compute & SSBO)
-        // =================================================================
-        // 물리 연산을 위한 데이터와 파이프라인을 만듭니다.
-
-        // [순서 중요] setupScene() 데이터로 SSBO(GPU 버퍼)를 먼저 만듭니다.
-        // 그래야 뒤에서 Raster/Compute 디스크립터 셋에 이 버퍼를 연결할 수 있습니다.
+        // 3-2. SSBO 생성 (위치/속도 정보)
         createObjectSSBO();
 
-        // Compute Shader 파이프라인 생성 (SSBO를 바인딩)
+        // 3-3. 가속 구조(AS) 및 Instance Buffer 생성
+        // 이유: Compute Shader가 'instanceBuffer'를 쓰려면 이 버퍼가 미리 존재해야 함
+        createBottomLevelAS();
+        createObjDescriptionBuffer();
+        createTopLevelAS(); // 여기서 instanceBuffer가 생성됨!
+
+        // 3-4. RT용 캔버스 생성
+        createStorageImage();
+        createInstanceColorBuffer();
+        createUniformBuffers();
+
+        // =========================================================
+        // [중요] 4. 파이프라인 및 디스크립터 (버퍼가 다 있는 상태에서 연결)
+        // =========================================================
+
+        // 4-1. Compute 파이프라인 (SSBO + InstanceBuffer 연결)
+        // 이제 objectSSBO와 instanceBuffer가 모두 존재하므로 안전함
         createComputePipeline();
 
-        // =================================================================
-        // 4. 래스터화 리소스 준비 (Rasterization Resources)
-        // =================================================================
-        // 화면에 1차적으로 물체를 그리기 위한 준비 단계입니다.
+        // 4-2. Raster 파이프라인 (SSBO 연결)
+        createRasterDescriptorSetLayout();
+        createRasterUniformBuffers();
+        createRasterDescriptorPool();
+        createRasterDescriptorSets(); // 이제 objectSSBO가 있으므로 연결 성공
+        createGraphicsPipeline();
 
-        createDepthResources();     // 깊이 버퍼(Depth Buffer) 생성 (앞/뒤 구분용)
-        createDepthSampler();       // 깊이 버퍼를 나중에 RT에서 읽을 때 사용할 샘플러
-        createRenderPass();         // 그리기 작업의 흐름(첨부물 로드/저장 등) 정의
-        createFramebuffers();       // RenderPass와 이미지를 연결하는 프레임버퍼 생성
+        // 4-3. RT 파이프라인 (AS 연결)
+        createRTDescriptorSetLayout();
+        createRTDescriptorPool();
+        createRTDescriptorSets();
+        createRTPipeline();
+        createShaderBindingTable();
 
-        // =================================================================
-        // 5. 래스터화 파이프라인 및 디스크립터 (Raster Pipeline & Descriptors)
-        // =================================================================
-        // 쉐이더가 사용할 데이터(UBO, SSBO) 연결 고리를 만듭니다.
+        // =========================================================
+        // 5. 명령 녹화 및 동기화
+        // =========================================================
+        createCommandBuffers();
+        createSyncObjects();
 
-        createRasterDescriptorSetLayout(); // 쉐이더 입력 구조 정의 (Binding 0: UBO, Binding 1: SSBO)
-        createGraphicsPipeline();          // 버텍스/프래그먼트 쉐이더 컴파일 및 파이프라인 생성
-
-        createRasterUniformBuffers();      // 카메라 정보(View/Proj) 담을 UBO 생성
-        createRasterDescriptorPool();      // 디스크립터 셋을 찍어낼 풀 생성
-
-        // [핵심 수정] 반드시 createObjectSSBO() 이후에 호출되어야 합니다!
-        // 이제 SSBO가 존재하므로, 안전하게 디스크립터 셋(Binding 1)에 연결할 수 있습니다.
-        createRasterDescriptorSets();
-
-        // =================================================================
-        // 6. 레이 트레이싱 리소스 준비 (Ray Tracing Resources)
-        // =================================================================
-        // 래스터화된 결과 위에 고품질 효과를 얹기 위한 준비입니다.
-
-        createInstanceColorBuffer();       // RT에서 쓸 색상 정보 버퍼
-        createStorageImage();              // RT 결과를 저장할 이미지 (캔버스)
-        createUniformBuffers();            // RT용 카메라/조명 정보 UBO
-        createBottomLevelAS();             // 모델 형상 가속 구조 (BLAS) 빌드
-        createObjDescriptionBuffer();      // 버텍스/인덱스 버퍼 주소 정보
-        createTopLevelAS();                // 인스턴스 배치 가속 구조 (TLAS) 빌드
-
-        // =================================================================
-        // 7. 레이 트레이싱 파이프라인 (Ray Tracing Pipeline)
-        // =================================================================
-        createRTDescriptorSetLayout();     // RT 쉐이더 입력 구조 정의
-        createRTDescriptorPool();          // RT용 디스크립터 풀
-        createRTDescriptorSets();          // 리소스(AS, StorageImage, 등) 연결
-        createRTPipeline();                // RayGen, Miss, Hit 쉐이더 파이프라인 생성
-        createShaderBindingTable();        // 쉐이더 함수 포인터 테이블(SBT) 생성
-
-        // =================================================================
-        // 8. 실행 명령 녹화 및 동기화 (Recording & Sync)
-        // =================================================================
-        // 실제 GPU가 수행할 작업을 기록합니다.
-        createCommandBuffers();            // Compute -> Raster -> RT 순서로 명령 녹화
-        createSyncObjects();               // 세마포어 및 펜스 생성 (GPU-CPU 동기화)
-
-        // =================================================================
-        // 9. 디버깅 및 도구 (Tools)
-        // =================================================================
-        // 프로파일러 초기화 (Query Pool 생성 등) - Device 생성 이후여야 함
         profiler.init(device, physicalDevice);
     }
 
@@ -714,6 +698,7 @@ private:
             glm::vec3(0.0f, -30.0f, 0.0f),
             glm::vec3(0.6f, 0.6f, 0.6f),
             glm::vec3(1.0f, 0.4f, 0.2f),
+            false,
             true
             });
 
@@ -723,6 +708,7 @@ private:
             glm::vec3(0.0f, -30.0f, 0.0f),
             glm::vec3(0.6f, 0.6f, 0.6f),
             glm::vec3(1.0f, 0.2f, 0.2f),
+            false,
             true
             });
 
@@ -886,11 +872,12 @@ private:
             throw std::runtime_error("failed to begin recording command buffer!");
         }
 
-        // [추가] 5-1. 프레임 측정 시작
+        // [프로파일링] 전체 프레임 측정 시작
         profiler.beginFrame(commandBuffer);
 
         // ==========================================================================================
-        // Phase 0: Compute Simulation (물리 연산) - 가장 먼저 실행!
+        // Phase 0: Compute Simulation (물리 연산)
+        // 설명: GPU에서 물체의 위치와 속도를 계산하고, SSBO와 TLAS Instance Buffer를 업데이트합니다.
         // ==========================================================================================
         profiler.beginSection(commandBuffer, "0. Compute Sim");
 
@@ -898,41 +885,102 @@ private:
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
 
         struct ComputePush { float dt; float time; int count; } push;
-        push.dt = 0.016f; // deltaTime (임시 고정값, 실제로는 mainLoop에서 받은 deltaTime 사용 권장)
+        push.dt = 0.016f; // 고정 델타 타임 (실제로는 변수로 받으세요)
         push.time = (float)glfwGetTime();
         push.count = (int)objects.size();
 
         vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        // 워크그룹 계산: (개수 + 255) / 256
+        // 워크그룹 디스패치: 물체 개수만큼 스레드 실행
         vkCmdDispatch(commandBuffer, (uint32_t)(objects.size() + 255) / 256, 1, 1);
 
-        profiler.endSection(commandBuffer);
+        profiler.endSection(commandBuffer); // Compute 끝
 
-        // [중요] Memory Barrier: Compute(쓰기) -> Vertex/RT(읽기) 동기화
-        VkBufferMemoryBarrier computeBarrier{};
-        computeBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        computeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; // Compute가 씀
-        computeBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR; // Vertex/RT가 읽음
-        computeBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        computeBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        computeBarrier.buffer = objectSSBO;
-        computeBarrier.offset = 0;
-        computeBarrier.size = VK_WHOLE_SIZE;
+        // ==========================================================================================
+        // Phase 0.5: GPU-Driven TLAS Rebuild (가속 구조 업데이트)
+        // 설명: Compute Shader가 수정한 Instance Buffer를 바탕으로, GPU가 TLAS를 다시 짓습니다.
+        // ==========================================================================================
+        profiler.beginSection(commandBuffer, "0.5 TLAS Build");
+
+        // [Barrier 1] Compute(쓰기) -> Build(읽기) 동기화
+        // "Compute Shader가 인스턴스 버퍼 수정을 마칠 때까지 가속 구조 빌더는 기다려라"
+        VkMemoryBarrier buildBarrier{};
+        buildBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        buildBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        buildBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
 
         vkCmdPipelineBarrier(commandBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // 소스 단계
-            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, // 목적 단계
-            0, 0, nullptr,
-            1, &computeBarrier,
-            0, nullptr);
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            0, 1, &buildBarrier, 0, nullptr, 0, nullptr);
+
+        // TLAS 빌드 명령 준비
+        // (createTopLevelAS에서 했던 설정을 그대로 사용하여 GPU에게 빌드 명령을 내립니다)
+        VkAccelerationStructureGeometryKHR geometry{};
+        geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+        geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+        geometry.geometry.instances.arrayOfPointers = VK_FALSE;
+        geometry.geometry.instances.data.deviceAddress = getBufferDeviceAddress(instanceBuffer); // Compute가 수정한 버퍼 주소
+
+        VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+        buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+        buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        // [중요] 업데이트가 아니라 '전체 빌드(BUILD)' 모드 사용 (구조가 많이 바뀌므로 안전함)
+        buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        buildInfo.dstAccelerationStructure = topLevelAS; // 기존 TLAS 덮어쓰기
+        buildInfo.geometryCount = 1;
+        buildInfo.pGeometries = &geometry;
+
+        // 멤버 변수로 저장해둔 Scratch Buffer 주소 사용
+        buildInfo.scratchData.deviceAddress = tlasScratchBufferAddress;
+
+        VkAccelerationStructureBuildRangeInfoKHR buildRangeInfo{};
+        buildRangeInfo.primitiveCount = (uint32_t)objects.size();
+        const VkAccelerationStructureBuildRangeInfoKHR* pBuildRangeInfo = &buildRangeInfo;
+
+        // 실제 빌드 명령 수행
+        auto vkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR");
+        vkCmdBuildAccelerationStructuresKHR(commandBuffer, 1, &buildInfo, &pBuildRangeInfo);
+
+        // [Barrier 2] Build(쓰기) -> RayTrace(읽기) 동기화
+        // "TLAS 빌드가 끝나야 레이 트레이싱 쉐이더가 사용할 수 있다"
+        VkMemoryBarrier rtBarrier{};
+        rtBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        rtBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        rtBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 1, &rtBarrier, 0, nullptr, 0, nullptr);
+
+        profiler.endSection(commandBuffer); // TLAS Build 끝
 
         // ==========================================================================================
-        // Phase 1: Rasterization Pass (G-Buffer/Depth 생성)
+        // Phase 1: Rasterization Pass
+        // 설명: 래스터화 파이프라인으로 기본 물체를 그립니다. (Compute가 업데이트한 SSBO 위치 사용)
         // ==========================================================================================
-
-        // [추가] 5-2. 래스터화 구간 시작
         profiler.beginSection(commandBuffer, "1. Raster");
+
+        // [Barrier 3] Compute(쓰기) -> Vertex Shader(읽기) 동기화
+        // "Compute가 SSBO 업데이트를 마쳐야 Vertex Shader가 읽을 수 있다"
+        VkBufferMemoryBarrier computeToVertexBarrier{};
+        computeToVertexBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        computeToVertexBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        computeToVertexBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; // Vertex Shader에서 SSBO 읽기
+        computeToVertexBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        computeToVertexBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        computeToVertexBarrier.buffer = objectSSBO;
+        computeToVertexBarrier.offset = 0;
+        computeToVertexBarrier.size = VK_WHOLE_SIZE;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            0, 0, nullptr, 1, &computeToVertexBarrier, 0, nullptr);
 
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -948,13 +996,10 @@ private:
         renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
         renderPassInfo.pClearValues = clearValues.data();
 
-        // 래스터화 시작
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &rasterDescriptorSets[currentFrame], 0, nullptr);
 
-        // isRaster == true 인 물체만 그리기
         for (size_t i = 0; i < objects.size(); i++) {
             if (objects[i].isRaster) {
                 VkBuffer vertexBuffers[] = { geometryDataList[i].vertexBuffer };
@@ -962,33 +1007,22 @@ private:
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
                 vkCmdBindIndexBuffer(commandBuffer, geometryDataList[i].indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-                RasterPushConstant pushConst{};
-                pushConst.model = glm::mat4(1.0f);
-                pushConst.model = glm::translate(pushConst.model, objects[i].position);
-                pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.x), glm::vec3(1, 0, 0));
-                pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.y), glm::vec3(0, 1, 0));
-                pushConst.model = glm::rotate(pushConst.model, glm::radians(objects[i].rotation.z), glm::vec3(0, 0, 1));
-                pushConst.model = glm::scale(pushConst.model, objects[i].scale);
-                pushConst.color = objects[i].color;
-
-                vkCmdPushConstants(commandBuffer, graphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(RasterPushConstant), &pushConst);
-                vkCmdDrawIndexed(commandBuffer, geometryDataList[i].indexCount, 1, 0, 0, 0);
+                // 중요: SSBO 인덱싱을 위해 'i'를 firstInstance 파라미터(마지막 인자)로 넘깁니다.
+                // Vertex Shader에서 gl_InstanceIndex로 이 값을 받아 SSBO[i]에 접근합니다.
+                vkCmdDrawIndexed(commandBuffer, geometryDataList[i].indexCount, 1, 0, 0, i);
             }
         }
         vkCmdEndRenderPass(commandBuffer);
-
-        // [추가] 5-3. 래스터화 구간 종료
         profiler.endSection(commandBuffer);
 
         // ==========================================================================================
         // Phase 2: Copy Background (Swapchain -> Storage Image)
-        // 래스터화된 결과를 RT 캔버스(Storage Image)로 복사해옵니다. (배경 합성용)
+        // 설명: 래스터화 결과를 RT용 캔버스로 복사합니다.
         // ==========================================================================================
 
-        // 1. Swapchain: Present Src -> Transfer Src (복사 원본 준비)
         VkImageMemoryBarrier swapChainReadBarrier{};
         swapChainReadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        swapChainReadBarrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; // RenderPass 종료 후 상태
+        swapChainReadBarrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         swapChainReadBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         swapChainReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         swapChainReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -997,7 +1031,6 @@ private:
         swapChainReadBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         swapChainReadBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-        // 2. Storage Image: Undefined -> Transfer Dst (복사 타겟 준비)
         VkImageMemoryBarrier storageWriteBarrier{};
         storageWriteBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         storageWriteBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1009,7 +1042,6 @@ private:
         storageWriteBarrier.srcAccessMask = 0;
         storageWriteBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-        // 3. Depth Image: Depth Attach -> Shader Read (RT에서 읽기 준비)
         VkImageMemoryBarrier depthBarrier{};
         depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -1028,7 +1060,6 @@ private:
             VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
             0, 0, nullptr, 0, nullptr, 3, preCopyBarriers);
 
-        // [복사 실행] 래스터화된 화면을 Storage Image로 복사
         VkImageCopy copyRegion{};
         copyRegion.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         copyRegion.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -1037,12 +1068,10 @@ private:
 
         // ==========================================================================================
         // Phase 3: Ray Tracing Pass
+        // 설명: 래스터화된 깊이(Depth)를 참고하여 RT 객체와 그림자를 그립니다.
         // ==========================================================================================
-
-        // [추가] 5-4. 레이 트레이싱 구간 시작
         profiler.beginSection(commandBuffer, "2. RayTrace");
 
-        // Storage Image: Transfer Dst -> General (RT 쉐이더 쓰기 준비)
         VkImageMemoryBarrier storageGeneralBarrier{};
         storageGeneralBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         storageGeneralBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1065,17 +1094,13 @@ private:
         auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
         vkCmdTraceRaysKHR(commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, swapChainExtent.width, swapChainExtent.height, 1);
 
-
-        // [추가] 5-5. 레이 트레이싱 구간 종료
-        profiler.endSection(commandBuffer);
-
+        profiler.endSection(commandBuffer); // RT 끝
 
         // ==========================================================================================
         // Phase 4: Final Copy (Storage Image -> Swapchain)
-        // RT 결과(Storage)를 다시 화면(Swapchain)으로 복사
+        // 설명: RT 결과물을 다시 화면으로 복사합니다.
         // ==========================================================================================
 
-        // 1. Storage Image: General -> Transfer Src
         VkImageMemoryBarrier copySrcBarrier{};
         copySrcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         copySrcBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -1087,10 +1112,9 @@ private:
         copySrcBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         copySrcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-        // 2. Swapchain: Transfer Src -> Transfer Dst (Phase 2에서 Src였음)
         VkImageMemoryBarrier copyDstBarrier{};
         copyDstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        copyDstBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; // 아까 배경 복사할 때 Src였음
+        copyDstBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         copyDstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         copyDstBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         copyDstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1106,11 +1130,11 @@ private:
             VK_PIPELINE_STAGE_TRANSFER_BIT,
             0, 0, nullptr, 0, nullptr, 2, postRTBarriers);
 
-        // 최종 복사 실행
         vkCmdCopyImage(commandBuffer, storageImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapChainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
 
         // ==========================================================================================
         // Phase 5: Present 준비
+        // 설명: 화면 출력을 위해 스왑체인 이미지를 Present Layout으로 전환합니다.
         // ==========================================================================================
 
         VkImageMemoryBarrier presentBarrier{};
@@ -1559,8 +1583,6 @@ private:
 
         std::vector<VkAccelerationStructureInstanceKHR> instances;
         for (size_t i = 0; i < objects.size(); i++) {
-            // if (objects[i].isRaster) continue;
-
             VkAccelerationStructureInstanceKHR instance{};
             glm::mat4 transform = glm::mat4(1.0f);
             transform = glm::translate(transform, objects[i].position);
@@ -1573,17 +1595,14 @@ private:
 
             instance.instanceCustomIndex = i;
 
-            //instance.mask = 0xFF;
-            // [수정 및 추가 코드] 인스턴스 마스크 설정
-            // 0x01: RT 물체 (직접 보여야 함)
-            // 0x02: Raster 물체 (그림자/반사에만 보여야 함)
+            // 마스크 설정 (RT vs Raster)
             if (objects[i].isRaster) {
-                instance.mask = 0x02;
+                instance.mask = 0x02; // Raster 전용
             }
             else {
-                instance.mask = 0x01;
+                instance.mask = 0x01; // RT 전용
             }
-            
+
             instance.instanceShaderBindingTableRecordOffset = 0;
             instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 
@@ -1594,8 +1613,14 @@ private:
             instances.push_back(instance);
         }
 
+        // [중요] Instance Buffer 생성 (STORAGE_BUFFER 비트 포함)
         VkDeviceSize instanceBufferSize = sizeof(VkAccelerationStructureInstanceKHR) * instances.size();
-        createBuffer(instanceBufferSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, instanceBuffer, instanceMemory);
+        createBuffer(instanceBufferSize,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, // <-- Compute Shader에서 쓰기 위해 필수!
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            instanceBuffer, instanceMemory);
 
         void* data;
         vkMapMemory(device, instanceMemory, 0, instanceBufferSize, 0, &data);
@@ -1623,7 +1648,11 @@ private:
         sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
         vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &primitiveCount, &sizeInfo);
 
-        createBuffer(sizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tlasBuffer.buffer, tlasBuffer.memory);
+        // TLAS 버퍼 생성
+        createBuffer(sizeInfo.accelerationStructureSize,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            tlasBuffer.buffer, tlasBuffer.memory);
 
         VkAccelerationStructureCreateInfoKHR createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
@@ -1634,23 +1663,33 @@ private:
             throw std::runtime_error("failed to create TLAS!");
         }
 
-        VkBuffer scratchBuffer;
-        VkDeviceMemory scratchMemory;
-        createBuffer(sizeInfo.buildScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, scratchBuffer, scratchMemory);
+        // [수정] 스크래치 버퍼 생성 (멤버 변수에 저장)
+        // 기존에 있던 지역 변수 scratchBuffer 생성 코드는 삭제하고 아래 코드로 대체합니다.
+        createBuffer(sizeInfo.buildScratchSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            tlasScratchBuffer, tlasScratchBufferMemory);
 
+        tlasScratchBufferAddress = getBufferDeviceAddress(tlasScratchBuffer);
+
+        // 빌드 정보에 스크래치 버퍼 주소 연결
         buildInfo.dstAccelerationStructure = topLevelAS;
-        buildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
+        buildInfo.scratchData.deviceAddress = tlasScratchBufferAddress; // 멤버 변수 주소 사용
 
         VkAccelerationStructureBuildRangeInfoKHR buildRangeInfo{};
         buildRangeInfo.primitiveCount = primitiveCount;
         const VkAccelerationStructureBuildRangeInfoKHR* pBuildRangeInfo = &buildRangeInfo;
 
+        // 실제 빌드 명령 실행
         VkCommandBuffer commandBuffer = beginSingleTimeCommands();
         vkCmdBuildAccelerationStructuresKHR(commandBuffer, 1, &buildInfo, &pBuildRangeInfo);
         endSingleTimeCommands(commandBuffer);
 
-        vkDestroyBuffer(device, scratchBuffer, nullptr);
-        vkFreeMemory(device, scratchMemory, nullptr);
+        // [중요] 스크래치 버퍼 삭제 코드 제거!
+        // vkDestroyBuffer(device, scratchBuffer, nullptr); <-- 삭제됨
+        // vkFreeMemory(device, scratchMemory, nullptr);    <-- 삭제됨
+        // 이 버퍼는 매 프레임 recordCommandBuffer에서 재사용해야 하므로 cleanup()에서 지워야 합니다.
+
         std::cout << "Created Top Level AS with " << instances.size() << " instances" << std::endl;
     }
 
@@ -2297,50 +2336,79 @@ private:
     }
 
     void cleanup() {
-        // [추가] 4. 프로파일러 정리
+        // 1. 프로파일러 정리
         profiler.cleanup();
 
+        // 2. 스왑체인 관련 리소스 정리 (이미지 뷰, 프레임버퍼 등)
         cleanupSwapChain();
 
-        // --- [수정] 래스터화 리소스 해제 추가 ---
+        // =========================================================
+        // 3. 파이프라인 및 레이아웃 해제
+        // =========================================================
+
+        // Rasterization
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, graphicsPipelineLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
-        // --------------------------------------
 
-
+        // Ray Tracing
         vkDestroyPipeline(device, rtPipeline, nullptr);
         vkDestroyPipelineLayout(device, rtPipelineLayout, nullptr);
+
+        // [추가] Compute Pipeline
+        vkDestroyPipeline(device, computePipeline, nullptr);
+        vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
+
+        // =========================================================
+        // 4. 디스크립터 관련 해제
+        // =========================================================
+
+        // Rasterization
+        vkDestroyDescriptorPool(device, rasterDescriptorPool, nullptr);
+        vkDestroyDescriptorSetLayout(device, rasterDescriptorSetLayout, nullptr);
+
+        // Ray Tracing
+        vkDestroyDescriptorPool(device, rtDescriptorPool, nullptr);
+        vkDestroyDescriptorSetLayout(device, rtDescriptorSetLayout, nullptr);
+
+        // [추가] Compute Descriptor
+        vkDestroyDescriptorPool(device, computeDescriptorPool, nullptr);
+        vkDestroyDescriptorSetLayout(device, computeDescriptorSetLayout, nullptr);
+
+        // =========================================================
+        // 5. 버퍼 및 메모리 해제
+        // =========================================================
+
+        // SBT (Shader Binding Table)
         vkDestroyBuffer(device, raygenShaderBindingTable, nullptr);
         vkFreeMemory(device, raygenShaderBindingTableMemory, nullptr);
         vkDestroyBuffer(device, missShaderBindingTable, nullptr);
         vkFreeMemory(device, missShaderBindingTableMemory, nullptr);
         vkDestroyBuffer(device, hitShaderBindingTable, nullptr);
         vkFreeMemory(device, hitShaderBindingTableMemory, nullptr);
+
+        // RT 관련 버퍼
         vkDestroyBuffer(device, instanceColorBuffer, nullptr);
         vkFreeMemory(device, instanceColorMemory, nullptr);
         vkDestroyBuffer(device, objDescBuffer, nullptr);
         vkFreeMemory(device, objDescBufferMemory, nullptr);
 
-        // [추가] 래스터화 UBO 및 디스크립터 해제
-        vkDestroyDescriptorPool(device, rasterDescriptorPool, nullptr);
-        vkDestroyDescriptorSetLayout(device, rasterDescriptorSetLayout, nullptr);
+        // [추가] SSBO (Compute & Raster 공유 버퍼)
+        vkDestroyBuffer(device, objectSSBO, nullptr);
+        vkFreeMemory(device, objectSSBOMemory, nullptr);
+
+        // UBOs
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vkDestroyBuffer(device, rasterUniformBuffers[i], nullptr);
             vkFreeMemory(device, rasterUniformBuffersMemory[i], nullptr);
-        }
-
-        vkDestroySampler(device, depthSampler, nullptr);
-
-
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vkDestroyBuffer(device, uniformBuffers[i], nullptr);
             vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
         }
 
-        vkDestroyDescriptorPool(device, rtDescriptorPool, nullptr);
-        vkDestroyDescriptorSetLayout(device, rtDescriptorSetLayout, nullptr);
+        // Sampler
+        vkDestroySampler(device, depthSampler, nullptr);
 
+        // Sync Objects
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
             vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
@@ -2349,27 +2417,44 @@ private:
 
         vkDestroyCommandPool(device, commandPool, nullptr);
 
+        // =========================================================
+        // 6. 가속 구조(AS) 및 관련 버퍼 해제
+        // =========================================================
         auto vkDestroyAccelerationStructureKHR = (PFN_vkDestroyAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkDestroyAccelerationStructureKHR");
+
+        // BLAS 해제
         for (auto& geoData : geometryDataList) {
             vkDestroyBuffer(device, geoData.vertexBuffer, nullptr);
             vkFreeMemory(device, geoData.vertexMemory, nullptr);
             vkDestroyBuffer(device, geoData.indexBuffer, nullptr);
             vkFreeMemory(device, geoData.indexMemory, nullptr);
+
             vkDestroyBuffer(device, geoData.blasBuffer, nullptr);
             vkFreeMemory(device, geoData.blasMemory, nullptr);
+
             if (geoData.blas != VK_NULL_HANDLE) {
                 vkDestroyAccelerationStructureKHR(device, geoData.blas, nullptr);
             }
         }
 
+        // TLAS 해제
         if (topLevelAS != VK_NULL_HANDLE) {
             vkDestroyAccelerationStructureKHR(device, topLevelAS, nullptr);
         }
         vkDestroyBuffer(device, tlasBuffer.buffer, nullptr);
         vkFreeMemory(device, tlasBuffer.memory, nullptr);
+
+        // Instance Buffer 해제
         vkDestroyBuffer(device, instanceBuffer, nullptr);
         vkFreeMemory(device, instanceMemory, nullptr);
 
+        // [추가] TLAS 빌드용 Scratch Buffer 해제 (여기서 합니다!)
+        vkDestroyBuffer(device, tlasScratchBuffer, nullptr);
+        vkFreeMemory(device, tlasScratchBufferMemory, nullptr);
+
+        // =========================================================
+        // 7. 디바이스 및 인스턴스 해제
+        // =========================================================
         vkDestroyDevice(device, nullptr);
 
         if (enableValidationLayers) {
@@ -2378,6 +2463,7 @@ private:
 
         vkDestroySurfaceKHR(instance, surface, nullptr);
         vkDestroyInstance(instance, nullptr);
+
         glfwDestroyWindow(window);
         glfwTerminate();
     }
@@ -2869,11 +2955,18 @@ private:
 
             initialStates[i].position = glm::vec4(objects[i].position, 1.0f);
 
-            // 랜덤 속도 부여 (예: -2.0 ~ 2.0 사이)
-            float vx = ((rand() % 100) / 25.0f) - 2.0f;
-            float vy = ((rand() % 100) / 25.0f) - 2.0f;
-            float vz = ((rand() % 100) / 25.0f) - 2.0f;
-            initialStates[i].velocity = glm::vec4(vx, vy, vz, 0.0f);
+            // [수정] 속도 및 Dynamic 플래그 설정
+            float vx = 0.0f, vy = 0.0f, vz = 0.0f;
+
+            if (objects[i].isDynamic) {
+                vx = ((rand() % 100) / 25.0f) - 2.0f;
+                vy = ((rand() % 100) / 25.0f) - 2.0f;
+                vz = ((rand() % 100) / 25.0f) - 2.0f;
+            }
+
+            // velocity.w 에 isDynamic 정보를 1.0(True) / 0.0(False)로 저장
+            float dynamicFlag = objects[i].isDynamic ? 1.0f : 0.0f;
+            initialStates[i].velocity = glm::vec4(vx, vy, vz, dynamicFlag);
 
             initialStates[i].color = glm::vec4(objects[i].color, 1.0f);
         }
@@ -2907,19 +3000,26 @@ private:
 
     void createComputePipeline() {
         // =================================================================
-        // 1. Descriptor Set Layout (SSBO 바인딩 0번)
+        // 1. Descriptor Set Layout (Binding 0: SSBO, Binding 1: Instance Buffer)
         // =================================================================
-        VkDescriptorSetLayoutBinding ssboBinding{};
-        ssboBinding.binding = 0;
-        ssboBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        ssboBinding.descriptorCount = 1;
-        // Compute 뿐만 아니라 Vertex(Raster), RayTracing(ClosestHit)에서도 읽을 수 있게 공유
-        ssboBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+        std::vector<VkDescriptorSetLayoutBinding> bindings(2); // [수정] 1 -> 2개
+
+        // Binding 0: Object SSBO (기존)
+        bindings[0].binding = 0;
+        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+        // [추가] Binding 1: TLAS Instance Buffer (Compute Shader가 직접 위치 수정용)
+        bindings[1].binding = 1;
+        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; // Compute에서만 씀
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = 1;
-        layoutInfo.pBindings = &ssboBinding;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size()); // [수정] size() 사용
+        layoutInfo.pBindings = bindings.data();
 
         if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &computeDescriptorSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create compute descriptor set layout!");
@@ -2947,7 +3047,7 @@ private:
         // =================================================================
         // 3. Compute Pipeline 생성
         // =================================================================
-        auto computeShaderCode = readFile("shaders/simulation.comp.spv"); // 쉐이더 파일 필요
+        auto computeShaderCode = readFile("shaders/simulation.comp.spv");
         VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
 
         VkPipelineShaderStageCreateInfo shaderStageInfo{};
@@ -2972,7 +3072,7 @@ private:
         // =================================================================
         VkDescriptorPoolSize poolSize{};
         poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSize.descriptorCount = 1;
+        poolSize.descriptorCount = 2; // [수정] SSBO 1개 + Instance Buffer 1개 = 2개
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -2994,21 +3094,40 @@ private:
             throw std::runtime_error("failed to allocate compute descriptor set!");
         }
 
-        // SSBO 연결
-        VkDescriptorBufferInfo bufferInfo{};
-        bufferInfo.buffer = objectSSBO;
-        bufferInfo.offset = 0;
-        bufferInfo.range = VK_WHOLE_SIZE;
+        // -----------------------------------------------------------
+        // Descriptor Update (Binding 0: SSBO, Binding 1: Instance Buffer)
+        // -----------------------------------------------------------
+        std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
 
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = computeDescriptorSet;
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pBufferInfo = &bufferInfo;
+        // (1) Binding 0: Object SSBO 연결
+        VkDescriptorBufferInfo ssboInfo{};
+        ssboInfo.buffer = objectSSBO;
+        ssboInfo.offset = 0;
+        ssboInfo.range = VK_WHOLE_SIZE;
 
-        vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[0].dstSet = computeDescriptorSet;
+        descriptorWrites[0].dstBinding = 0;
+        descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        descriptorWrites[0].descriptorCount = 1;
+        descriptorWrites[0].pBufferInfo = &ssboInfo;
+
+        // (2) Binding 1: Instance Buffer 연결 [추가]
+        // createTopLevelAS에서 만든 instanceBuffer를 멤버 변수로 가지고 있어야 합니다.
+        VkDescriptorBufferInfo instanceInfo{};
+        instanceInfo.buffer = instanceBuffer;
+        instanceInfo.offset = 0;
+        instanceInfo.range = VK_WHOLE_SIZE;
+
+        descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[1].dstSet = computeDescriptorSet;
+        descriptorWrites[1].dstBinding = 1;
+        descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        descriptorWrites[1].descriptorCount = 1;
+        descriptorWrites[1].pBufferInfo = &instanceInfo;
+
+        // 업데이트 실행 (배열로 한 번에)
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
     }
 
 
