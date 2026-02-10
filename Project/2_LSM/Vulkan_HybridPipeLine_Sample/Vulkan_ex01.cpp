@@ -557,7 +557,7 @@ private:
             glm::vec3(0.0f, 0.0f, 0.0f),
             glm::vec3(20.0f, 0.1f, 20.0f),
             glm::vec3(0.8f, 0.8f, 0.8f)
-            ,false
+            ,true
             });
 
         objects.push_back({
@@ -566,7 +566,7 @@ private:
             glm::vec3(0.0f),
             glm::vec3(20.0f, 0.1f, 20.0f),
             glm::vec3(1.0f, 1.0f, 1.0f)
-            ,false
+            ,true
             });
 
 
@@ -649,14 +649,14 @@ private:
 
         lights.resize(2);
 
-        lights[0] = {
+        /*lights[0] = {
             glm::vec3(0.0f, 9.0f, 2.0f),
             1.2f,
             glm::vec3(1.0f, 1.0f, 1.0f),
             1
-        };
+        };*/
 
-        lights[1] = {
+        lights[0] = {
             glm::vec3(-8.0f, 5.0f, -5.0f),
             0.5f,
             glm::vec3(0.0f, 0.0f, 0.9f),
@@ -1529,7 +1529,7 @@ private:
 
         std::vector<VkAccelerationStructureInstanceKHR> instances;
         for (size_t i = 0; i < objects.size(); i++) {
-            if (objects[i].isRaster) continue;
+            // if (objects[i].isRaster) continue;
 
             VkAccelerationStructureInstanceKHR instance{};
             glm::mat4 transform = glm::mat4(1.0f);
@@ -1542,7 +1542,18 @@ private:
             memcpy(&instance.transform, &transposed, sizeof(VkTransformMatrixKHR));
 
             instance.instanceCustomIndex = i;
-            instance.mask = 0xFF;
+
+            //instance.mask = 0xFF;
+            // [수정 및 추가 코드] 인스턴스 마스크 설정
+            // 0x01: RT 물체 (직접 보여야 함)
+            // 0x02: Raster 물체 (그림자/반사에만 보여야 함)
+            if (objects[i].isRaster) {
+                instance.mask = 0x02;
+            }
+            else {
+                instance.mask = 0x01;
+            }
+            
             instance.instanceShaderBindingTableRecordOffset = 0;
             instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 
