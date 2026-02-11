@@ -1,157 +1,252 @@
-#pragma once
+Ôªø#pragma once
+
+// [ÌïÑÏàò] Windows Îß§ÌÅ¨Î°ú Ï∂©Îèå Î∞©ÏßÄ
+#define NOMINMAX 
 
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <string>
 #include <iostream>
 #include <sstream>
-#include <iomanip> // std::fixed, std::setprecision
+#include <iomanip>
+#include <map>
+#include <algorithm>
+#include <chrono>
 
-struct TimeStamp {
+// Visual Studio Output Ï∂úÎ†•ÏùÑ ÏúÑÌïú Ìó§Îçî
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#endif
+
+struct SectionStats {
+    double totalTimeMs = 0.0;
+    double minTimeMs = 999999.0;
+    double maxTimeMs = 0.0;
+    uint64_t count = 0;
+    double movingAvgMs = 0.0;
+
+    void update(double timeMs) {
+        if (timeMs < 0.0001 || timeMs > 1000.0) return;
+        totalTimeMs += timeMs;
+        count++;
+        minTimeMs = std::min(minTimeMs, timeMs);
+        maxTimeMs = std::max(maxTimeMs, timeMs);
+        if (count == 1) movingAvgMs = timeMs;
+        else movingAvgMs = (movingAvgMs * 0.95) + (timeMs * 0.05);
+    }
+    double getAverage() const { return count > 0 ? (totalTimeMs / count) : 0.0; }
+};
+
+struct SectionData {
     std::string name;
     uint32_t startQueryIdx;
     uint32_t endQueryIdx;
+    uint32_t statQueryIdx;
 };
 
 class VulkanProfiler {
 public:
-    // √ ±‚»≠: Vulkan DeviceøÕ Physical Device∞° « ø‰«’¥œ¥Ÿ.
+    bool enableConsoleOutput = false;
+    bool enableVSOutput = true;
+
     void init(VkDevice device, VkPhysicalDevice physicalDevice, uint32_t maxQueries = 128) {
         this->device = device;
+        this->physicalDevice = physicalDevice;
         this->maxQueries = maxQueries;
 
-        // 1. ≈∏¿”Ω∫≈∆«¡ ¡÷±‚(Period) ∞°¡Æø¿±‚ (≥™≥Î√  -> π–∏Æ√  ∫Ø»ØøÎ)
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(physicalDevice, &props);
         timestampPeriod = props.limits.timestampPeriod;
 
-        // 2. ƒı∏Æ «Æ(Query Pool) ª˝º∫
-        VkQueryPoolCreateInfo queryPoolInfo{};
-        queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        queryPoolInfo.queryCount = maxQueries;
+        // 1. Timestamp Pool
+        VkQueryPoolCreateInfo timePoolInfo{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        timePoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        timePoolInfo.queryCount = maxQueries;
+        if (vkCreateQueryPool(device, &timePoolInfo, nullptr, &queryPoolTimestamp) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create timestamp query pool!");
+        }
 
-        if (vkCreateQueryPool(device, &queryPoolInfo, nullptr, &queryPool) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create query pool!");
+        // 2. Statistics Pool
+        VkQueryPoolCreateInfo statPoolInfo{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        statPoolInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+        statPoolInfo.queryCount = maxQueries;
+        statPoolInfo.pipelineStatistics =
+            VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
+            VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |
+            VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT;
+
+        if (vkCreateQueryPool(device, &statPoolInfo, nullptr, &queryPoolStats) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create statistics query pool!");
         }
     }
 
-    // ¡æ∑· Ω√ ∏Æº“Ω∫ «ÿ¡¶
     void cleanup() {
-        if (queryPool != VK_NULL_HANDLE) {
-            vkDestroyQueryPool(device, queryPool, nullptr);
-        }
+        if (queryPoolTimestamp) vkDestroyQueryPool(device, queryPoolTimestamp, nullptr);
+        if (queryPoolStats) vkDestroyQueryPool(device, queryPoolStats, nullptr);
     }
 
-    // «¡∑π¿” Ω√¿€ Ω√ »£√‚ (ƒø∏«µÂ πˆ∆€ ±‚∑œ Ω√¿€ ¡˜»ƒ)
     void beginFrame(VkCommandBuffer cmdBuf) {
-        vkCmdResetQueryPool(cmdBuf, queryPool, 0, maxQueries);
+        vkCmdResetQueryPool(cmdBuf, queryPoolTimestamp, 0, maxQueries);
+        vkCmdResetQueryPool(cmdBuf, queryPoolStats, 0, maxQueries);
         currentQueryIdx = 0;
-        timeStamps.clear();
+        currentStatIdx = 0;
+        frameDrawCalls = 0;
+        frameInstanceCount = 0;
+        frameDispatchCalls = 0;
+        frameTraceRaysCalls = 0;
+        frameSections.clear();
     }
 
-    // ±∏∞£ √¯¡§ Ω√¿€ (øπ: "Raster Pass")
+    // ================= [ÎûòÌçº Ìï®Ïàò] =================
+    void CmdDrawIndexed(VkCommandBuffer cb, uint32_t ic, uint32_t instC, uint32_t fi, int32_t vo, uint32_t fInst) {
+        frameDrawCalls++; frameInstanceCount += instC;
+        vkCmdDrawIndexed(cb, ic, instC, fi, vo, fInst);
+    }
+    void CmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t instC, uint32_t fv, uint32_t fInst) {
+        frameDrawCalls++; frameInstanceCount += instC;
+        vkCmdDraw(cb, vc, instC, fv, fInst);
+    }
+    void CmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
+        frameDispatchCalls++; vkCmdDispatch(cb, x, y, z);
+    }
+    void CmdTraceRaysKHR(VkCommandBuffer cb, const VkStridedDeviceAddressRegionKHR* r, const VkStridedDeviceAddressRegionKHR* m, const VkStridedDeviceAddressRegionKHR* h, const VkStridedDeviceAddressRegionKHR* c, uint32_t w, uint32_t ht, uint32_t d) {
+        frameTraceRaysCalls++;
+        auto func = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
+        if (func) func(cb, r, m, h, c, w, ht, d);
+    }
+
     void beginSection(VkCommandBuffer cmdBuf, const std::string& name) {
-        if (currentQueryIdx + 2 > maxQueries) return; // ƒı∏Æ «Æ √ ∞˙ πÊ¡ˆ
-
+        if (currentQueryIdx + 2 > maxQueries) return;
         uint32_t idx = currentQueryIdx++;
-        // ∆ƒ¿Ã«¡∂Û¿Œ¿« ∞°¿Â æ’¥‹(Top)ø°º≠ ≈∏¿”Ω∫≈∆«¡ ±‚∑œ
-        vkCmdWriteTimestamp(cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, idx);
-
-        TimeStamp ts;
-        ts.name = name;
-        ts.startQueryIdx = idx;
-        timeStamps.push_back(ts);
+        vkCmdWriteTimestamp(cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPoolTimestamp, idx);
+        vkCmdBeginQuery(cmdBuf, queryPoolStats, currentStatIdx, 0);
+        SectionData data; data.name = name; data.startQueryIdx = idx; data.statQueryIdx = currentStatIdx;
+        frameSections.push_back(data);
     }
 
-    // ±∏∞£ √¯¡§ ¡æ∑·
     void endSection(VkCommandBuffer cmdBuf) {
-        if (timeStamps.empty()) return;
-        if (currentQueryIdx >= maxQueries) return;
-
-        TimeStamp& ts = timeStamps.back();
+        if (frameSections.empty()) return;
+        SectionData& data = frameSections.back();
+        vkCmdEndQuery(cmdBuf, queryPoolStats, currentStatIdx);
+        currentStatIdx++;
         uint32_t idx = currentQueryIdx++;
-        ts.endQueryIdx = idx;
-
-        // ∆ƒ¿Ã«¡∂Û¿Œ¿« ∞°¿Â µﬁ¥‹(Bottom)ø°º≠ ≈∏¿”Ω∫≈∆«¡ ±‚∑œ
-        vkCmdWriteTimestamp(cmdBuf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, idx);
+        data.endQueryIdx = idx;
+        vkCmdWriteTimestamp(cmdBuf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPoolTimestamp, idx);
     }
 
-    // [ø…º« 1] ƒ‹º÷√¢ø° ∞·∞˙ √‚∑¬ (vkQueueWaitIdle « ø‰)
-    void printResults() {
+    void updateAndPrintConsole() {
         if (currentQueryIdx == 0) return;
 
-        std::vector<uint64_t> buffer(currentQueryIdx);
+        // 1. Time Í≤∞Í≥º Í∞ÄÏ†∏Ïò§Í∏∞
+        std::vector<uint64_t> timeResults(currentQueryIdx);
+        VkResult resTime = vkGetQueryPoolResults(device, queryPoolTimestamp, 0, currentQueryIdx,
+            sizeof(uint64_t) * currentQueryIdx, timeResults.data(), sizeof(uint64_t), // TimeÏùÄ 1Í∞úÏî©Ïù¥ÎØÄÎ°ú stride = sizeof(uint64) ÎßûÏùå
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 
-        // GPU∞° ∞™¿ª ¥Ÿ æµ ∂ß±Ó¡ˆ ±‚¥Ÿ∑»¥Ÿ∞° ∞°¡Æø» (WAIT_BIT)
-        VkResult result = vkGetQueryPoolResults(device, queryPool, 0, currentQueryIdx,
-            sizeof(uint64_t) * currentQueryIdx, buffer.data(),
-            sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        // 2. Stat Í≤∞Í≥º Í∞ÄÏ†∏Ïò§Í∏∞ (Ïó¨Í∏∞Í∞Ä Ï§ëÏöî!)
+        int numStats = 3; // Vertices, Primitives, Invocations
+        std::vector<uint64_t> statResults(currentStatIdx * numStats);
 
-        if (result == VK_SUCCESS) {
-            std::cout << "\n=== Performance Frame ===" << std::endl;
-            float totalGpuTime = 0.0f;
+        // ‚òÖ‚òÖ‚òÖ [Î≤ÑÍ∑∏ ÏàòÏ†ï] strideÎ•º 'sizeof(uint64_t)'ÏóêÏÑú 'sizeof(uint64_t) * numStats'Î°ú Î≥ÄÍ≤Ω ‚òÖ‚òÖ‚òÖ
+        // ÏøºÎ¶¨ ÌïòÎÇòÎãπ Îç∞Ïù¥ÌÑ∞ 3Í∞úÍ∞Ä Î¨∂Ïó¨ÏûàÍ∏∞ ÎïåÎ¨∏Ïóê 3Ïπ∏Ïî© Í±¥ÎÑàÎõ∞Ïñ¥Ïïº Ìï©ÎãàÎã§.
+        VkResult resStat = vkGetQueryPoolResults(device, queryPoolStats, 0, currentStatIdx,
+            sizeof(uint64_t) * currentStatIdx * numStats, statResults.data(),
+            sizeof(uint64_t) * numStats, // <--- [ÌïµÏã¨ ÏàòÏ†ï ÏÇ¨Ìï≠]
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 
-            for (const auto& ts : timeStamps) {
-                uint64_t start = buffer[ts.startQueryIdx];
-                uint64_t end = buffer[ts.endQueryIdx];
+        if (resTime != VK_SUCCESS || resStat != VK_SUCCESS) return;
 
-                // ≥™≥Î√  -> π–∏Æ√  ∫Ø»Ø (timestampPeriod¥¬ GPU∏∂¥Ÿ ¥Ÿ∏ß)
-                float durationMs = (end - start) * timestampPeriod / 1000000.0f;
+        double totalFrameTime = 0.0;
+        for (const auto& sec : frameSections) {
+            uint64_t tStart = timeResults[sec.startQueryIdx];
+            uint64_t tEnd = timeResults[sec.endQueryIdx];
+            if (tEnd <= tStart) continue;
 
-                std::cout << "[GPU] " << ts.name << ": " << durationMs << " ms" << std::endl;
-                totalGpuTime += durationMs;
-            }
-            std::cout << "-------------------------" << std::endl;
-            std::cout << "Total GPU Time: " << totalGpuTime << " ms" << std::endl;
-            if (totalGpuTime > 0)
-                std::cout << "Est. FPS: " << (1000.0f / totalGpuTime) << std::endl;
+            double durationMs = (double)(tEnd - tStart) * timestampPeriod / 1000000.0;
+            if (durationMs > 1000.0) continue;
+
+            statsMap[sec.name].update(durationMs);
+            totalFrameTime += durationMs;
         }
-    }
 
-    // [ø…º« 2] ∞·∞˙∏¶ πÆ¿⁄ø≠∑Œ π›»Ø (¿©µµøÏ ≈∏¿Ã∆≤πŸ «•Ω√øÎ, Non-Blocking)
-    // WaitIdle æ¯¿Ã ¡ÔΩ√ π›»Ø¿ª Ω√µµ«œπ«∑Œ, ∑ª¥ı∏µ¿ª ∏ÿ√ﬂ¡ˆ æ ∞Ì æµ ºˆ ¿÷Ω¿¥œ¥Ÿ.
-    std::string getResultsString() {
-        if (currentQueryIdx == 0) return "Profiling...";
-
-        std::vector<uint64_t> buffer(currentQueryIdx);
-        // VK_QUERY_RESULT_WAIT_BIT∏¶ ª∞Ω¿¥œ¥Ÿ. æ∆¡˜ GPU∞° ¿œ«œ¥¬ ¡ﬂ¿Ã∏È VK_NOT_READY∏¶ π›»Ø«’¥œ¥Ÿ.
-        VkResult result = vkGetQueryPoolResults(device, queryPool, 0, currentQueryIdx,
-            sizeof(uint64_t) * currentQueryIdx, buffer.data(),
-            sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-
-        if (result != VK_SUCCESS) return "Collecting...";
+        // Ï∂úÎ†• Ï£ºÍ∏∞
+        static auto lastPrint = std::chrono::high_resolution_clock::now();
+        auto now = std::chrono::high_resolution_clock::now();
+        if (std::chrono::duration<float, std::milli>(now - lastPrint).count() < 500.0f) return;
+        lastPrint = now;
 
         std::stringstream ss;
-        ss << std::fixed << std::setprecision(2);
+        ss << "\n___________________________________________________________________\n";
+        ss << " [P.R.I.S.M] Perf Update | FPS: " << std::fixed << std::setprecision(0) << (1000.0 / (totalFrameTime > 0 ? totalFrameTime : 1.0))
+            << " | GPU Time: " << std::setprecision(2) << totalFrameTime << "ms \n";
 
-        float totalGpuTime = 0.0f;
-        ss << "[GPU] ";
+        printMemoryInfo(ss);
 
-        for (size_t i = 0; i < timeStamps.size(); ++i) {
-            const auto& ts = timeStamps[i];
-            uint64_t start = buffer[ts.startQueryIdx];
-            uint64_t end = buffer[ts.endQueryIdx];
-            float durationMs = (end - start) * timestampPeriod / 1000000.0f;
+        ss << " [Calls] Draw: " << frameDrawCalls << " (Inst: " << frameInstanceCount << ")"
+            << " | Dispatch: " << frameDispatchCalls << " | TraceRays: " << frameTraceRaysCalls << "\n";
 
-            ss << ts.name << ": " << durationMs << "ms";
-            if (i < timeStamps.size() - 1) ss << " | ";
+        ss << " -------------------------------------------------------------------\n";
+        ss << " " << std::left << std::setw(12) << "Section" << std::right << std::setw(9) << "Cur(ms)"
+            << std::setw(9) << "Avg(ms)" << std::setw(14) << "Primitives" << "\n";
+        ss << " -------------------------------------------------------------------\n";
 
-            totalGpuTime += durationMs;
+        for (const auto& sec : frameSections) {
+            const auto& stat = statsMap[sec.name];
+            // Îç∞Ïù¥ÌÑ∞Í∞Ä 3Í∞úÏî© Î¨∂Ïó¨ ÏûàÏúºÎØÄÎ°ú Ïù∏Îç±Ïä§ Í≥ÑÏÇ∞ Ï£ºÏùò
+            uint64_t prims = statResults[sec.statQueryIdx * numStats + 1];
+
+            ss << " " << std::left << std::setw(12) << sec.name
+                << std::right << std::fixed << std::setprecision(3)
+                << std::setw(9) << stat.movingAvgMs
+                << std::setw(9) << stat.getAverage()
+                << std::setw(14) << formatNum(prims) << "\n";
         }
+        ss << "___________________________________________________________________\n";
 
-        if (totalGpuTime > 0) {
-            ss << " | Total: " << totalGpuTime << "ms (" << (int)(1000.0f / totalGpuTime) << " FPS)";
-        }
-
-        return ss.str();
+        if (enableConsoleOutput) std::cout << "\033[H" << ss.str();
+        if (enableVSOutput) OutputDebugStringA(ss.str().c_str());
     }
 
 private:
     VkDevice device = VK_NULL_HANDLE;
-    VkQueryPool queryPool = VK_NULL_HANDLE;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkQueryPool queryPoolTimestamp = VK_NULL_HANDLE;
+    VkQueryPool queryPoolStats = VK_NULL_HANDLE;
     float timestampPeriod = 1.0f;
     uint32_t maxQueries = 0;
     uint32_t currentQueryIdx = 0;
-    std::vector<TimeStamp> timeStamps;
+    uint32_t currentStatIdx = 0;
+
+    uint32_t frameDrawCalls = 0;
+    uint32_t frameInstanceCount = 0;
+    uint32_t frameDispatchCalls = 0;
+    uint32_t frameTraceRaysCalls = 0;
+
+    std::vector<SectionData> frameSections;
+    std::map<std::string, SectionStats> statsMap;
+
+    std::string formatNum(uint64_t num) {
+        if (num > 1000000) return std::to_string(num / 1000000) + "M";
+        if (num > 1000) return std::to_string(num / 1000) + "k";
+        return std::to_string(num);
+    }
+
+    void printMemoryInfo(std::stringstream& ss) {
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT memBudget{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT };
+        VkPhysicalDeviceMemoryProperties2 memProps2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2 };
+        memProps2.pNext = &memBudget;
+        vkGetPhysicalDeviceMemoryProperties2(physicalDevice, &memProps2);
+
+        VkDeviceSize vramUsage = 0;
+        VkDeviceSize vramBudget = 0;
+        for (uint32_t i = 0; i < memProps2.memoryProperties.memoryHeapCount; i++) {
+            if (memProps2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+                vramUsage = memBudget.heapUsage[i];
+                vramBudget = memBudget.heapBudget[i];
+                break;
+            }
+        }
+        ss << " [VRAM] " << (vramUsage / 1024 / 1024) << "MB / " << (vramBudget / 1024 / 1024) << "MB\n";
+    }
 };

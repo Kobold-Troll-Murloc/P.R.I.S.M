@@ -6,6 +6,7 @@ struct ObjectData {
     vec4 position;
     vec4 velocity;
     vec4 color;
+    vec4 scale;
 };
 
 // SSBO 바인딩 (Raster Descriptor Set에 SSBO 바인딩 추가 필요!)

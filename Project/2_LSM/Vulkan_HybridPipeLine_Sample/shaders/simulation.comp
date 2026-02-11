@@ -7,6 +7,7 @@ struct ObjectData {
     vec4 position;
     vec4 velocity;
     vec4 color;
+    vec4 scale;
 };
 layout(std140, binding = 0) buffer ObjectBuffer {
     ObjectData objects[];
@@ -48,6 +49,8 @@ void main() {
     vec3 pos = objects[idx].position.xyz;
     vec3 vel = objects[idx].velocity.xyz;
 
+    vec3 scale = objects[idx].scale.xyz;
+
     pos += vel * push.deltaTime;
 
     // 벽 튕기기 (-10 ~ 10)
@@ -61,7 +64,16 @@ void main() {
 
     // 모델 행렬 생성 (이동만 적용)
     mat4 m = mat4(1.0);
+    // m[3] = vec4(pos, 1.0);
+
+    // 대각선 성분에 각각의 스케일 적용
+    m[0][0] = scale.x; // X축 스케일
+    m[1][1] = scale.y; // Y축 스케일
+    m[2][2] = scale.z; // Z축 스케일
+    
+    // 위치 적용 (4번째 열)
     m[3] = vec4(pos, 1.0);
+
     objects[idx].model = m;
 
     // 2. [핵심] TLAS Instance Buffer 업데이트

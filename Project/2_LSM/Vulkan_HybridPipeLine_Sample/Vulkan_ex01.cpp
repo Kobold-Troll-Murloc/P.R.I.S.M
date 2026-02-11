@@ -44,7 +44,8 @@ const std::vector<const char*> deviceExtensions = {
     VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
     VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-    VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME
+    VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+    VK_EXT_MEMORY_BUDGET_EXTENSION_NAME // <--- [필수 추가] 이거 없으면 VRAM 측정 불가
 };
 
 #ifdef NDEBUG
@@ -181,6 +182,7 @@ struct ObjState {
     glm::vec4 position; // 16 bytes (xyz: pos, w: scale/padding)
     glm::vec4 velocity; // 16 bytes (xyz: vel, w: padding)
     glm::vec4 color;    // 16 bytes
+    glm::vec4 scale;    // [추가] 16 bytes (xyz: scale, w: padding)
 }; // Total: 112 bytes (align 맞춰짐)
 
 class RayTracedScene {
@@ -325,6 +327,25 @@ private:
     VkBuffer tlasScratchBuffer;
     VkDeviceMemory tlasScratchBufferMemory;
     VkDeviceAddress tlasScratchBufferAddress;
+
+    // -------- [Model Instancing 관련] --------
+
+    // [추가] 각 오브젝트가 몇 번째 지오메트리(모델)를 사용하는지 저장하는 리스트
+    std::vector<int> objectToGeometryIndex;
+
+
+    // [추가] 같은 모델을 묶어서 그리기 위한 정보 구조체
+    struct RenderBatch {
+        int geometryIndex;      // geometryDataList의 몇 번째 모델인가?
+        uint32_t firstInstance; // SSBO상의 시작 인덱스
+        uint32_t instanceCount; // 그릴 개수
+    };
+
+    // [추가] 생성된 배치들을 저장할 리스트
+    std::vector<RenderBatch> renderBatches;
+
+
+    // ------------------------------------
 
 
 
@@ -498,7 +519,7 @@ private:
                     v.normal = glm::vec3(0.0f, 1.0f, 0.0f);
                 }
             }
-            std::cout << "Computed smooth normals for: " << path << std::endl;
+            //std::cout << "Computed smooth normals for: " << path << std::endl;
         }
 
         geoData.vertexCount = vertices.size();
@@ -624,7 +645,7 @@ private:
             glm::vec3(0.0f, 0.0f, 0.0f),
             glm::vec3(20.0f, 0.1f, 20.0f),
             glm::vec3(0.8f, 0.8f, 0.8f)
-            ,false
+            ,true
             });
 
         objects.push_back({
@@ -708,7 +729,7 @@ private:
             glm::vec3(0.0f, -30.0f, 0.0f),
             glm::vec3(0.6f, 0.6f, 0.6f),
             glm::vec3(1.0f, 0.2f, 0.2f),
-            false,
+            true,
             true
             });
 
@@ -720,6 +741,33 @@ private:
             glm::vec3(1.0f, 0.8f, 0.0f),
             false
             });
+
+        // 2. 돼지 저금통 군단 생성 (예: 2,000마리)
+        int countX = 20;
+        int countY = 5;
+        int countZ = 20;
+        float spacing = 2.5f;
+
+        for (int x = 0; x < countX; x++) {
+            for (int y = 0; y < countY; y++) {
+                for (int z = 0; z < countZ; z++) {
+                    objects.push_back({
+                        //"models/PiggyBank.obj",
+                        "models/cube.obj",
+                        // 공중에 띄워서 배치
+                        glm::vec3((x - countX / 2.0f) * spacing,
+                                  10.0f + y * spacing,
+                                  (z - countZ / 2.0f) * spacing),
+                        glm::vec3(0.0f, 0.0f, 0.0f), // 회전
+                        glm::vec3(0.1f, 0.1f, 0.1f), // 스케일
+                        // 색상을 위치에 따라 알록달록하게
+                        glm::vec3((float)x / countX, (float)y / countY, (float)z / countZ),
+                        true, // isRaster (true로 해야 Raster 파이프라인이 그림)
+                        true  // isDynamic (true여야 Compute Shader가 움직임)
+                        });
+                }
+            }
+        }
 
         lights.resize(2);
 
@@ -738,6 +786,19 @@ private:
         };
 
         std::cout << "Scene Loaded: " << objects.size() << " objects, " << lights.size() << " lights" << std::endl;
+
+
+        // [핵심 추가] 모델별로 정렬 (Sorting)
+        // 1순위: Raster 물체끼리 모으기 (그리기 효율 위해)
+        // 2순위: 같은 모델(Path)끼리 모으기
+        std::sort(objects.begin(), objects.end(), [](const ObjectInstance& a, const ObjectInstance& b) {
+            if (a.isRaster != b.isRaster) {
+                return a.isRaster > b.isRaster; // true(Raster)가 앞으로 오도록
+            }
+            return a.modelPath < b.modelPath; // 같은 속성이라면 모델 이름순 정렬
+            });
+
+        std::cout << "Scene Objects Sorted" << std::endl;
 
     }
 
@@ -825,17 +886,18 @@ private:
             throw std::runtime_error("failed to present swap chain image!");
         }
 
-        // [추가] 6. 결과 확인 및 윈도우 타이틀 업데이트 (0.5초마다)
-        titleUpdateTimer += deltaTime; // deltaTime은 mainLoop에서 계산됨
-        if (titleUpdateTimer > 0.5f) {
-            std::string stats = profiler.getResultsString();
+        //// [추가] 6. 결과 확인 및 윈도우 타이틀 업데이트 (0.5초마다)
+        //titleUpdateTimer += deltaTime; // deltaTime은 mainLoop에서 계산됨
+        //if (titleUpdateTimer > 0.5f) {
+        //    std::string stats = profiler.getResultsString();
 
-            if (!stats.empty()) {
-                std::string title = "P.R.I.S.M Hybrid Renderer - " + stats;
-                glfwSetWindowTitle(window, title.c_str());
-            }
-            titleUpdateTimer = 0.0f;
-        }
+        //    if (!stats.empty()) {
+        //        std::string title = "P.R.I.S.M Hybrid Renderer - " + stats;
+        //        glfwSetWindowTitle(window, title.c_str());
+        //    }
+        //    titleUpdateTimer = 0.0f;
+        //}
+        profiler.updateAndPrintConsole();
 
 
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -892,7 +954,11 @@ private:
         vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
         // 워크그룹 디스패치: 물체 개수만큼 스레드 실행
-        vkCmdDispatch(commandBuffer, (uint32_t)(objects.size() + 255) / 256, 1, 1);
+        //vkCmdDispatch(commandBuffer, (uint32_t)(objects.size() + 255) / 256, 1, 1);
+
+        // [수정 1] Compute Dispatch -> profiler 래퍼 함수 사용
+        // 기존: vkCmdDispatch(commandBuffer, (uint32_t)(objects.size() + 255) / 256, 1, 1);
+        profiler.CmdDispatch(commandBuffer, (uint32_t)(objects.size() + 255) / 256, 1, 1);
 
         profiler.endSection(commandBuffer); // Compute 끝
 
@@ -907,6 +973,8 @@ private:
         VkMemoryBarrier buildBarrier{};
         buildBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         buildBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        //buildBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        // 기존 코드 에러 수정: BUILD_READ_BIT_KHR 대신 READ_BIT_KHR 사용
         buildBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
 
         vkCmdPipelineBarrier(commandBuffer,
@@ -1000,18 +1068,53 @@ private:
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &rasterDescriptorSets[currentFrame], 0, nullptr);
 
-        for (size_t i = 0; i < objects.size(); i++) {
-            if (objects[i].isRaster) {
-                VkBuffer vertexBuffers[] = { geometryDataList[i].vertexBuffer };
-                VkDeviceSize offsets[] = { 0 };
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-                vkCmdBindIndexBuffer(commandBuffer, geometryDataList[i].indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-                // 중요: SSBO 인덱싱을 위해 'i'를 firstInstance 파라미터(마지막 인자)로 넘깁니다.
-                // Vertex Shader에서 gl_InstanceIndex로 이 값을 받아 SSBO[i]에 접근합니다.
-                vkCmdDrawIndexed(commandBuffer, geometryDataList[i].indexCount, 1, 0, 0, i);
-            }
+        //for (size_t i = 0; i < objects.size(); i++) {
+        //    if (objects[i].isRaster) {
+        //        int geomIdx = objectToGeometryIndex[i]; // [추가] 매핑된 지오메트리 인덱스 가져오기
+
+        //        // geometryDataList[i] 대신 geometryDataList[geomIdx] 사용!
+        //        VkBuffer vertexBuffers[] = { geometryDataList[geomIdx].vertexBuffer };
+        //        VkDeviceSize offsets[] = { 0 };
+        //        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        //        vkCmdBindIndexBuffer(commandBuffer, geometryDataList[geomIdx].indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        //        // Draw 호출 (인덱스 카운트도 geomIdx로 가져와야 함)
+        //        vkCmdDrawIndexed(commandBuffer, geometryDataList[geomIdx].indexCount, 1, 0, 0, i);
+        //    }
+        //}
+        
+
+
+        // [최적화] 진정한 인스턴싱 렌더링
+        // renderBatches 벡터에는 "모델A 500개", "모델B 1000개" 식의 정보가 들어있습니다.
+
+        for (const auto& batch : renderBatches) {
+            // 1. 모델(버텍스 버퍼) 바인딩
+            VkBuffer vertexBuffers[] = { geometryDataList[batch.geometryIndex].vertexBuffer };
+            VkDeviceSize offsets[] = { 0 };
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            vkCmdBindIndexBuffer(commandBuffer, geometryDataList[batch.geometryIndex].indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+            // 2. 한 방에 그리기 (Instanced Draw)
+            // instanceCount: 이 모델로 몇 개를 그릴 것인가?
+            // firstInstance: SSBO의 몇 번째 데이터부터 사용할 것인가? (정렬했으므로 batch.firstInstance 사용)
+
+            //vkCmdDrawIndexed(commandBuffer,
+            //    geometryDataList[batch.geometryIndex].indexCount, // indexCount
+            //    batch.instanceCount,                              // instanceCount (예: 2000)
+            //    0,                                                // firstIndex
+            //    0,                                                // vertexOffset
+            //    batch.firstInstance);                             // firstInstance (SSBO Offset)
+            // 기존: vkCmdDrawIndexed(commandBuffer, ...);
+            profiler.CmdDrawIndexed(commandBuffer,
+                geometryDataList[batch.geometryIndex].indexCount, // indexCount
+                batch.instanceCount,                              // instanceCount
+                0,                                                // firstIndex
+                0,                                                // vertexOffset
+                batch.firstInstance);                             // firstInstance
         }
+
         vkCmdEndRenderPass(commandBuffer);
         profiler.endSection(commandBuffer);
 
@@ -1091,8 +1194,13 @@ private:
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipelineLayout, 0, 1, &rtDescriptorSets[currentFrame], 0, nullptr);
 
-        auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
-        vkCmdTraceRaysKHR(commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, swapChainExtent.width, swapChainExtent.height, 1);
+        /*auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(device, "vkCmdTraceRaysKHR");
+        vkCmdTraceRaysKHR(commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, swapChainExtent.width, swapChainExtent.height, 1);*/
+        // [수정 3] Trace Rays -> profiler 래퍼 함수 사용
+        // 기존: auto vkCmdTraceRaysKHR = ...; vkCmdTraceRaysKHR(...);
+        profiler.CmdTraceRaysKHR(commandBuffer,
+            &raygenRegion, &missRegion, &hitRegion, &callableRegion,
+            swapChainExtent.width, swapChainExtent.height, 1);
 
         profiler.endSection(commandBuffer); // RT 끝
 
@@ -1234,6 +1342,78 @@ private:
         if (physicalDevice == VK_NULL_HANDLE) throw std::runtime_error("failed to find a suitable GPU!");
     }
 
+    //void createLogicalDevice() {
+    //    QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+    //    std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+    //    std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsFamily.value(), indices.presentFamily.value() };
+
+    //    float queuePriority = 1.0f;
+    //    for (uint32_t queueFamily : uniqueQueueFamilies) {
+    //        VkDeviceQueueCreateInfo queueCreateInfo{};
+    //        queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    //        queueCreateInfo.queueFamilyIndex = queueFamily;
+    //        queueCreateInfo.queueCount = 1;
+    //        queueCreateInfo.pQueuePriorities = &queuePriority;
+    //        queueCreateInfos.push_back(queueCreateInfo);
+    //    }
+
+    //    VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures{};
+    //    bufferDeviceAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    //    bufferDeviceAddressFeatures.bufferDeviceAddress = VK_TRUE;
+
+    //    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
+    //    rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    //    rtPipelineFeatures.rayTracingPipeline = VK_TRUE;
+    //    rtPipelineFeatures.pNext = &bufferDeviceAddressFeatures;
+
+    //    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
+    //    asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    //    asFeatures.accelerationStructure = VK_TRUE;
+    //    asFeatures.pNext = &rtPipelineFeatures;
+
+    //    VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexingFeatures{};
+    //    descriptorIndexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    //    descriptorIndexingFeatures.runtimeDescriptorArray = VK_TRUE;
+    //    descriptorIndexingFeatures.pNext = &asFeatures;
+
+    //    // 1. 기본 기능 구조체 설정
+    //    VkPhysicalDeviceFeatures deviceFeatures{};
+    //    deviceFeatures.shaderInt64 = VK_TRUE;   // 64비트 정수 활성화
+    //    deviceFeatures.shaderFloat64 = VK_TRUE; // 64비트 실수 활성화 (필요하다면)
+
+    //    deviceFeatures.pipelineStatisticsQuery = VK_TRUE;
+
+    //    VkPhysicalDeviceFeatures2 deviceFeatures2{};
+    //    deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    //    deviceFeatures2.features = deviceFeatures;
+    //    deviceFeatures2.pNext = &descriptorIndexingFeatures;
+
+    //    VkDeviceCreateInfo createInfo{};
+    //    createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    //    createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+    //    createInfo.pQueueCreateInfos = queueCreateInfos.data();
+    //    createInfo.pNext = &deviceFeatures2;
+    //    createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    //    createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+
+    //    //추가됨
+    //    createInfo.pEnabledFeatures = nullptr;
+
+    //    if (enableValidationLayers) {
+    //        createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+    //        createInfo.ppEnabledLayerNames = validationLayers.data();
+    //    }
+    //    else {
+    //        createInfo.enabledLayerCount = 0;
+    //    }
+
+    //    if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
+    //        throw std::runtime_error("failed to create logical device!");
+    //    }
+
+    //    vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
+    //    vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
+    //}
     void createLogicalDevice() {
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
@@ -1249,6 +1429,9 @@ private:
             queueCreateInfos.push_back(queueCreateInfo);
         }
 
+        // ------------------------------------------------------------------
+        // [1] 확장 기능 구조체들 (pNext 체인)
+        // ------------------------------------------------------------------
         VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures{};
         bufferDeviceAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
         bufferDeviceAddressFeatures.bufferDeviceAddress = VK_TRUE;
@@ -1268,26 +1451,40 @@ private:
         descriptorIndexingFeatures.runtimeDescriptorArray = VK_TRUE;
         descriptorIndexingFeatures.pNext = &asFeatures;
 
-        // 1. 기본 기능 구조체 설정
-        VkPhysicalDeviceFeatures deviceFeatures{};
-        deviceFeatures.shaderInt64 = VK_TRUE;   // 64비트 정수 활성화
-        deviceFeatures.shaderFloat64 = VK_TRUE; // 64비트 실수 활성화 (필요하다면)
-
+        // ------------------------------------------------------------------
+        // [2] 기본 기능 + Features2 구조체 통합 (여기가 핵심!)
+        // ------------------------------------------------------------------
         VkPhysicalDeviceFeatures2 deviceFeatures2{};
         deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        deviceFeatures2.features = deviceFeatures;
+
+        // 여기에 모든 기본 기능 설정을 몰아넣습니다.
+        deviceFeatures2.features.shaderInt64 = VK_TRUE;
+        deviceFeatures2.features.shaderFloat64 = VK_TRUE;
+
+        // ★★★ [필수] 통계 쿼리 활성화 ★★★
+        deviceFeatures2.features.pipelineStatisticsQuery = VK_TRUE;
+
+        // [중요] 다른 기본 기능들도 필요하면 여기서 켜야 합니다. (예: samplerAnisotropy 등)
+        deviceFeatures2.features.samplerAnisotropy = VK_TRUE;
+        deviceFeatures2.features.fragmentStoresAndAtomics = VK_TRUE; // 필요시
+
+        // pNext 체인 연결 (기본 기능 -> 확장 기능들)
         deviceFeatures2.pNext = &descriptorIndexingFeatures;
 
+        // ------------------------------------------------------------------
+        // [3] 디바이스 생성 정보
+        // ------------------------------------------------------------------
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
+
+        // [핵심] pNext에 Features2를 연결하고, pEnabledFeatures는 반드시 nullptr로 설정!
         createInfo.pNext = &deviceFeatures2;
+        createInfo.pEnabledFeatures = nullptr;
+
         createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
         createInfo.ppEnabledExtensionNames = deviceExtensions.data();
-
-        //추가됨
-        createInfo.pEnabledFeatures = nullptr;
 
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
@@ -1478,7 +1675,7 @@ private:
 
 
 
-    void createBottomLevelAS() {
+    /*void createBottomLevelAS() {
         auto vkGetAccelerationStructureBuildSizesKHR = (PFN_vkGetAccelerationStructureBuildSizesKHR)vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR");
         auto vkCreateAccelerationStructureKHR = (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR");
         auto vkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR");
@@ -1549,17 +1746,171 @@ private:
             vkFreeMemory(device, scratchMemory, nullptr);
         }
         std::cout << "Created " << bottomLevelAS.size() << " Bottom Level AS" << std::endl;
+    }*/
+
+    void createBottomLevelAS() {
+        auto vkGetAccelerationStructureBuildSizesKHR = (PFN_vkGetAccelerationStructureBuildSizesKHR)vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR");
+        auto vkCreateAccelerationStructureKHR = (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR");
+        auto vkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR");
+        auto vkGetAccelerationStructureDeviceAddressKHR = (PFN_vkGetAccelerationStructureDeviceAddressKHR)vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR");
+
+        // [캐싱] 파일 경로(모델 이름) -> geometryDataList의 인덱스
+        std::unordered_map<std::string, int> loadedModels;
+
+        // 초기화
+        // (주의: BLAS 버퍼들을 지우는 cleanup 로직은 별도로 있어야 하지만, initVulkan 재호출이 아니라면 괜찮습니다)
+        bottomLevelAS.clear();
+        geometryDataList.clear();
+        objectToGeometryIndex.clear();
+
+        // 현재 처리 중인 배치를 추적하기 위한 변수
+        RenderBatch currentBatch{};
+        currentBatch.geometryIndex = -1;
+        currentBatch.firstInstance = 0;
+        currentBatch.instanceCount = 0;
+
+        for (size_t i = 0; i < objects.size(); i++) {
+            std::string path = objects[i].modelPath;
+            int geometryIndex = -1;
+
+            // 1. 이미 로딩된 모델인지 확인
+            if (loadedModels.find(path) != loadedModels.end()) {
+                // 이미 있다! (캐싱된 인덱스 사용)
+                geometryIndex = loadedModels[path];
+            }
+            else {
+                // 2. 새로운 모델이다! (로딩 및 BLAS 빌드)
+
+                // [중요 수정] 스케일을 1.0으로 고정해서 로드합니다.
+                // 개별 물체의 크기(scale)는 TLAS Instance Transform에서 처리해야 
+                // 하나의 BLAS를 크기가 다른 여러 물체가 공유할 수 있습니다.
+                GeometryData newData = loadGeometry(path, glm::vec3(1.0f));
+
+                // --- BLAS 빌드 시작 ---
+                VkAccelerationStructureGeometryKHR geometry{};
+                geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+                geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+                geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+                geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+                geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+                geometry.geometry.triangles.vertexData.deviceAddress = getBufferDeviceAddress(newData.vertexBuffer);
+                geometry.geometry.triangles.vertexStride = sizeof(Vertex);
+                geometry.geometry.triangles.maxVertex = newData.vertexCount;
+                geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+                geometry.geometry.triangles.indexData.deviceAddress = getBufferDeviceAddress(newData.indexBuffer);
+
+                VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+                buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+                buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+                buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+                buildInfo.geometryCount = 1;
+                buildInfo.pGeometries = &geometry;
+
+                uint32_t primitiveCount = newData.indexCount / 3;
+                VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+                sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+                vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &primitiveCount, &sizeInfo);
+
+                createBuffer(sizeInfo.accelerationStructureSize,
+                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    newData.blasBuffer, newData.blasMemory);
+
+                VkAccelerationStructureCreateInfoKHR createInfo{};
+                createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+                createInfo.buffer = newData.blasBuffer;
+                createInfo.size = sizeInfo.accelerationStructureSize;
+                createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+
+                if (vkCreateAccelerationStructureKHR(device, &createInfo, nullptr, &newData.blas) != VK_SUCCESS) {
+                    throw std::runtime_error("failed to create BLAS!");
+                }
+
+                // Scratch Buffer (임시)
+                VkBuffer scratchBuffer;
+                VkDeviceMemory scratchMemory;
+                createBuffer(sizeInfo.buildScratchSize,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    scratchBuffer, scratchMemory);
+
+                buildInfo.dstAccelerationStructure = newData.blas;
+                buildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
+
+                VkAccelerationStructureBuildRangeInfoKHR buildRangeInfo{};
+                buildRangeInfo.primitiveCount = primitiveCount;
+                const VkAccelerationStructureBuildRangeInfoKHR* pBuildRangeInfo = &buildRangeInfo;
+
+                VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+                vkCmdBuildAccelerationStructuresKHR(commandBuffer, 1, &buildInfo, &pBuildRangeInfo);
+                endSingleTimeCommands(commandBuffer);
+
+                vkDestroyBuffer(device, scratchBuffer, nullptr);
+                vkFreeMemory(device, scratchMemory, nullptr);
+                // --- BLAS 빌드 끝 ---
+
+                // 리스트에 추가
+                geometryDataList.push_back(newData);
+                bottomLevelAS.push_back(newData.blas);
+
+                geometryIndex = (int)geometryDataList.size() - 1;
+                loadedModels[path] = geometryIndex; // 맵에 등록
+
+                std::cout << "Loaded Model: " << path << " (Shared Geometry Index: " << geometryIndex << ")" << std::endl;
+            }
+
+            // 3. 이 오브젝트는 몇 번째 Geometry를 쓰는지 기록
+            objectToGeometryIndex.push_back(geometryIndex);
+
+            // 2. [핵심] 배치(Batch) 그룹화 로직
+            // 래스터화 대상인 경우만 배치를 만듭니다.
+            if (objects[i].isRaster) {
+                // 첫 번째 물체이거나, 이전 물체와 모델이 다르다면 -> 새로운 배치 시작
+                if (currentBatch.geometryIndex == -1) {
+                    currentBatch.geometryIndex = geometryIndex;
+                    currentBatch.firstInstance = (uint32_t)i;
+                    currentBatch.instanceCount = 1;
+                }
+                else if (currentBatch.geometryIndex != geometryIndex) {
+                    // 이전 배치를 저장하고 새로 시작
+                    renderBatches.push_back(currentBatch);
+
+                    currentBatch.geometryIndex = geometryIndex;
+                    currentBatch.firstInstance = (uint32_t)i;
+                    currentBatch.instanceCount = 1;
+                }
+                else {
+                    // 같은 모델이면 개수만 증가
+                    currentBatch.instanceCount++;
+                }
+            }
+        }
+
+        // 마지막 남은 배치 저장
+        if (currentBatch.geometryIndex != -1 && currentBatch.instanceCount > 0) {
+            renderBatches.push_back(currentBatch);
+        }
+
+        std::cout << "Total Unique Meshes: " << geometryDataList.size() << std::endl;
+        std::cout << "Total Objects: " << objects.size() << std::endl;
     }
 
     void createObjDescriptionBuffer() {
         std::vector<ObjDesc> objDescs;
-        objDescs.reserve(objects.size());
 
-        for (const auto& geoData : geometryDataList) {
-            ObjDesc desc;
-            desc.vertexAddress = getBufferDeviceAddress(geoData.vertexBuffer);
-            desc.indexAddress = getBufferDeviceAddress(geoData.indexBuffer);
-            objDescs.push_back(desc);
+        // [핵심 변경 1] 버퍼 크기는 '유니크한 모델 개수'가 아니라 '총 인스턴스 개수'여야 합니다.
+        // 쉐이더에서 gl_InstanceCustomIndexEXT (0 ~ 1999)로 접근하기 때문입니다.
+        objDescs.resize(objects.size());
+
+        for (size_t i = 0; i < objects.size(); i++) {
+            // [핵심 변경 2] i번째 물체가 몇 번째 모델(Geometry)을 쓰는지 조회
+            int geomIdx = objectToGeometryIndex[i];
+
+            // 해당 모델의 버퍼 주소를 가져와서 저장
+            // (예: 150번째 돼지 -> PiggyBank 모델의 주소 저장)
+            objDescs[i].vertexAddress = getBufferDeviceAddress(geometryDataList[geomIdx].vertexBuffer);
+            objDescs[i].indexAddress = getBufferDeviceAddress(geometryDataList[geomIdx].indexBuffer);
         }
 
         VkDeviceSize bufferSize = sizeof(ObjDesc) * objDescs.size();
@@ -1608,7 +1959,10 @@ private:
 
             VkAccelerationStructureDeviceAddressInfoKHR addressInfo{};
             addressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
-            addressInfo.accelerationStructure = bottomLevelAS[i];
+            //addressInfo.accelerationStructure = bottomLevelAS[i];
+            int geomIdx = objectToGeometryIndex[i];
+            addressInfo.accelerationStructure = bottomLevelAS[geomIdx];
+
             instance.accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(device, &addressInfo);
             instances.push_back(instance);
         }
@@ -2969,6 +3323,9 @@ private:
             initialStates[i].velocity = glm::vec4(vx, vy, vz, dynamicFlag);
 
             initialStates[i].color = glm::vec4(objects[i].color, 1.0f);
+
+            // [추가] Scale 정보 저장! (비균일 스케일 지원)
+            initialStates[i].scale = glm::vec4(objects[i].scale, 0.0f);
         }
 
         // 3. 데이터 복사 (Map -> Memcpy -> Unmap)
