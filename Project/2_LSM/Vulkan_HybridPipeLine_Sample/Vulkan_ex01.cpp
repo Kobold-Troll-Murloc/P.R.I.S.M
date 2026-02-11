@@ -720,7 +720,7 @@ private:
             glm::vec3(0.6f, 0.6f, 0.6f),
             glm::vec3(1.0f, 0.4f, 0.2f),
             false,
-            true
+            false
             });
 
         objects.push_back({
@@ -730,7 +730,7 @@ private:
             glm::vec3(0.6f, 0.6f, 0.6f),
             glm::vec3(1.0f, 0.2f, 0.2f),
             true,
-            true
+            false
             });
 
         objects.push_back({
@@ -743,17 +743,17 @@ private:
             });
 
         // 2. 돼지 저금통 군단 생성 (예: 2,000마리)
-        int countX = 20;
-        int countY = 5;
-        int countZ = 20;
-        float spacing = 2.5f;
+        int countX = 40;
+        int countY = 10;
+        int countZ = 50;
+        float spacing = 0.5f;
 
         for (int x = 0; x < countX; x++) {
             for (int y = 0; y < countY; y++) {
                 for (int z = 0; z < countZ; z++) {
                     objects.push_back({
-                        //"models/PiggyBank.obj",
-                        "models/cube.obj",
+                        /*"models/cube.obj",*/
+                        "models/PiggyBank.obj",
                         // 공중에 띄워서 배치
                         glm::vec3((x - countX / 2.0f) * spacing,
                                   10.0f + y * spacing,
@@ -906,7 +906,10 @@ private:
     void updateUniformBuffer(uint32_t currentImage) {
         UniformBufferObject ubo{};
         glm::mat4 view = glm::lookAt(camera.position, camera.position + camera.front, camera.up);
-        glm::mat4 proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 100.0f);
+        //glm::mat4 proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 100.0f);
+        //[수정]멀리있는물체도 보이게끔 near, far거리 수정
+        glm::mat4 proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 1.0f, 10000.0f);
+
         proj[1][1] *= -1;
         ubo.viewInverse = glm::inverse(view);
         ubo.projInverse = glm::inverse(proj);
@@ -2912,7 +2915,10 @@ private:
         colorAttachment.format = swapChainImageFormat;
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
         // 중요: 레이 트레이싱 결과 위에 그릴 것이므로 로드(Load) 시 지우지 않고(LOAD) 내용을 유지합니다.
-        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; 
+
+        //colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; 
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+
         colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -3067,7 +3073,13 @@ private:
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+
+        // [수정 전] VK_CULL_MODE_BACK_BIT (뒷면 안 그림 - 기본값)
+        //rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+
+        // [수정 후] VK_CULL_MODE_NONE (양면 다 그림)
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
+
         rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -3258,7 +3270,8 @@ private:
     void updateRasterUniformBuffer(uint32_t currentImage) {
         RasterUBO ubo{};
         ubo.view = glm::lookAt(camera.position, camera.position + camera.front, camera.up);
-        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 100.0f);
+        //ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 100.0f);
+        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 1.0f, 10000.0f);
         ubo.proj[1][1] *= -1; // Vulkan Y 좌표계 반전
 
         memcpy(rasterUniformBuffersMapped[currentImage], &ubo, sizeof(ubo));

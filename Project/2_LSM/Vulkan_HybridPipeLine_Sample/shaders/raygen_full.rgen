@@ -1,0 +1,59 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
+layout(set = 0, binding = 1, rgba8) uniform image2D image;
+
+// [중요] 사용하진 않지만 바인딩 번호(5)를 유지해야 에러가 안 남!
+layout(set = 0, binding = 5) uniform sampler2D depthMap; 
+
+layout(set = 0, binding = 2, std140) uniform UniformBufferObject {
+    mat4 viewInverse;
+    mat4 projInverse;
+    vec3 cameraPos;
+    float padding1;
+} ubo;
+
+struct HitPayload {
+    vec3 color;
+    float hitT;
+};
+
+layout(location = 0) rayPayloadEXT HitPayload payload;
+
+void main()
+{
+    const vec2 pixelCenter = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    const vec2 inUV = pixelCenter / vec2(gl_LaunchSizeEXT.xy);
+    vec2 d = inUV * 2.0 - 1.0;
+
+    vec4 origin = ubo.viewInverse * vec4(0,0,0,1);
+    vec4 target = ubo.projInverse * vec4(d.x, d.y, 1, 1);
+    vec4 direction = ubo.viewInverse * vec4(normalize(target.xyz), 0);
+
+    // -----------------------------------------------------------
+    // [Full RT] 깊이 버퍼 무시, 무조건 무한대까지 발사
+    // -----------------------------------------------------------
+    float tMax = 10000.0; // 충분히 멀리
+
+    payload.hitT = 0.0;
+
+    // Mask 0xFF: 모든 물체(Raster 물체 + RT 물체) 다 충돌 검사
+    // 즉, 바닥(Floor)도 레이 트레이싱으로 다시 계산함
+    traceRayEXT(topLevelAS, 
+        gl_RayFlagsOpaqueEXT, 
+        0xFF,              // Mask: 0xFF (모든 물체 Hit)
+        0, 0, 0, 
+        origin.xyz, 0.001, 
+        direction.xyz, 
+        tMax,              // 무한대
+        0
+    );
+
+    // -----------------------------------------------------------
+    // [결과 덮어쓰기]
+    // 맞았든 안 맞았든(Miss Shader 색상) 무조건 RT 결과로 덮어씀
+    // Rasterization Pass가 그렸던 이미지는 100% 무시됨 (낭비 발생)
+    // -----------------------------------------------------------
+    imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(payload.color, 1.0));
+}
