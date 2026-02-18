@@ -833,3 +833,170 @@ NVIDIA의 최신 레이트레이싱 기술을 엔진에 통합하는 방법.
 *   **실무**: 최적화, 협업, 로드맵, 그리고 엔진 개발자의 마음가짐.
 
 이제 코드를 작성할 시간입니다. **첫 번째 Ray가 화면에 그려지는 그 순간의 전율**을 꼭 느껴보시기 바랍니다. 당신의 PRISM 프로젝트가 실시간 그래픽의 새로운 지평을 열기를 진심으로 응원합니다!
+
+---
+
+## 50. AI 기반 소프트바디 시뮬레이션 (AI-Accelerated Softbody)
+
+전통적인 물리 시뮬레이션의 복잡한 연산을 신경망(Neural Network)으로 근사하여, 실시간으로 정교한 소프트바디(Softbody) 변형을 구현하는 기술임.
+
+### 50.1 신경망 물리 (Neural Physics)의 원리
+*   **학습**: 오프라인에서 정교한 물리 시뮬레이터(FEM 등)를 통해 물체의 변형 데이터를 학습시킴.
+*   **추론(Inference)**: 엔진 런타임에서 AI 모델이 현재 힘(Force)과 충돌 정보를 입력받아, 다음 프레임의 정점 위치(Deformation)를 즉각적으로 예측.
+*   **이점**: 반복적인 반복 계산(Iterative Solver) 없이 단 한 번의 추론으로 복잡한 비선형 변형을 계산할 수 있어 성능이 압도적임.
+
+---
+
+## 51. 컴퓨트 쉐이더 기반 AI 추론 통합 (Neural Inference Integration)
+
+AI 모델을 CPU가 아닌 불칸의 **컴퓨트 쉐이더(Compute Shader)**에서 실행하여 CPU-GPU 병목을 제거함.
+
+### 51.1 쉐이더 내 신경망 구현
+*   **가중치(Weights) 전달**: 학습된 AI 모델의 가중치를 `VulkanVaoManager`를 통해 전용 **Storage Buffer**에 업로드.
+*   **행렬 연산 최적화**: 컴퓨트 쉐이더의 `Shared Memory`와 `Subgroup` 연산을 활용해 신경망의 핵심인 행렬 곱셈(GEMM)을 가속.
+*   **프레임워크**: 필요시 `ONNX Runtime (Vulkan Backend)`이나 `TensorFlow Lite (Vulkan)`와 연동하거나, 직접 GLSL로 단순화된 추론 로직을 작성.
+
+---
+
+## 52. AI 물리와 레이트레이싱의 동기화 (Syncing Physics & RT)
+
+소프트바디 변형이 일어나면, 레이트레이싱을 위한 **가속 구조(AS)**도 즉시 갱신되어야 함.
+
+### 52.1 구현 워크플로우
+1.  **[Compute] AI Inference**: 컴퓨트 쉐이더가 소프트바디의 새로운 정점 위치를 계산하고 정점 버퍼(VBO)를 업데이트.
+2.  **[Barrier] Memory Barrier**: 컴퓨트 쉐이더의 쓰기 작업이 끝났음을 알리고, 가속 구조 빌더가 읽을 수 있도록 동기화.
+3.  **[Ray Tracing] AS Refit**: 업데이트된 정점 데이터를 기반으로 **BLAS(Bottom Level AS)**를 **Refit**하여 광선 추적이 변형된 형태를 인식하게 함.
+4.  **[Ray Tracing] Trace Rays**: 변형된 소프트바디 위에서 반사/그림자 광선을 계산.
+
+---
+
+## 53. AI 물리 시스템 구현 로드맵 (AI Physics Roadmap)
+
+### [1단계] 기초 데이터 구조 설계
+*   정점 버퍼를 `Storage Buffer` 겸용으로 설정하여 컴퓨트 쉐이더에서 직접 수정 가능하게 함.
+*   오거-넥스트의 `VulkanQueue`에서 `getComputeEncoder()`를 통해 물리 연산 전용 패스 확보.
+
+### [2단계] 단순 물리 모델 구현 (PBD on Compute)
+*   AI 도입 전, `Position Based Dynamics (PBD)`를 컴퓨트 쉐이더로 먼저 구현하여 정점 변형-가속 구조 갱신 파이프라인의 안정성 검증.
+
+### [3단계] AI 모델 통합 및 최적화
+*   학습된 모델을 로드하고 컴퓨트 쉐이더 추론 로직 구현.
+*   **Sparse Neural Networks** 기법을 사용하여 불필요한 연산을 제거하고 성능 극대화.
+
+---
+**💡 추가 학습 키워드**: `Physics-Informed Neural Networks (PINNs)`, `Vulkan Storage Buffers`, `Shader Subgroup Operations`, `BLAS Refitting Strategy`.
+
+---
+
+## 54. PRISM 그랜드 파이프라인 (The Grand Pipeline)
+
+이 파이프라인은 한 프레임 내에서 **[물리 추론 -> 가속 구조 갱신 -> G-Buffer 생성 -> 레이트레이싱 -> 디노이징 -> 최종 합성]**의 전 과정을 관리함.
+
+### 54.1 파이프라인 시각화 (Visual Flow)
+
+```mermaid
+graph TD
+    subgraph "Phase 1: Scene & Physics (Compute/CPU)"
+        A[CPU: Scene Culling & Task Scheduling] --> B[Compute: AI Softbody Inference]
+        B --> C[Compute/Graphics: AS BLAS Refit & TLAS Update]
+    end
+
+    subgraph "Phase 2: Rasterization (Graphics)"
+        C --> D[Graphics: G-Buffer Pass - MRT]
+        D --> E[Normals / Depth / Roughness / Motion Vectors]
+    end
+
+    subgraph "Phase 3: Ray Tracing (Ray Tracing)"
+        E --> F[Ray Tracing: RT Pass - GI/Shadow/Reflection]
+        F --> G[Noisy RT Result]
+    end
+
+    subgraph "Phase 4: Denoising & Final (Compute/Graphics)"
+        G --> H[Compute: SVGF/ASVGF Denoising]
+        E -.-> H
+        H --> I[Graphics: Final Composition & UI]
+        I --> J[Display: Presentation]
+    end
+
+    %% Sync Points (Barriers)
+    B -- "Memory Barrier" --> C
+    C -- "Execution Barrier" --> D
+    D -- "Image Layout Transition" --> F
+    G -- "Compute Barrier" --> H
+```
+
+### 54.2 단계별 데이터 흐름 상세 (Detailed Phase Breakdown)
+
+#### **1단계: 씬 분석 및 AI 물리 (Scene & Physics)**
+*   **Input**: 이전 프레임 상태, 사용자 입력, AI 가중치(Storage Buffer).
+*   **Process**: 
+    *   CPU가 가시성 판단(Culling)을 수행하는 동안, **컴퓨트 쉐이더**는 AI 추론을 통해 소프트바디의 변형(Deformation)을 계산.
+    *   계산된 정점 데이터를 기반으로 **가속 구조(BLAS)**를 고속 업데이트(Refit).
+*   **Sync**: `Compute-to-Graphics Barrier`를 통해 물리 연산 완료 보장.
+
+#### **2단계: 래스터화 - G-Buffer 생성 (Rasterization)**
+*   **Input**: 업데이트된 정점/인덱스 버퍼, HLMS 재질 데이터.
+*   **Process**: 
+    *   기존 오거의 래스터화 파이프라인을 사용해 화면의 기하학적 정보(G-Buffer)를 다중 렌더 타겟(MRT)에 기록.
+    *   **Motion Vectors**는 디노이징과 안티앨리어싱을 위해 필수적으로 추출.
+*   **Sync**: `Graphics-to-RayTracing Barrier` (Image Layout: `ColorAttachment` → `ShaderReadOnly`).
+
+#### **3단계: 레이트레이싱 패스 (Ray Tracing)**
+*   **Input**: G-Buffer 정보, TLAS(가속 구조), Bindless Textures, PBR 재질 버퍼.
+*   **Process**: 
+    *   G-Buffer의 위치/노멀 정보를 시작점으로 광선을 투사(`vkCmdTraceRaysKHR`).
+    *   직접 조명(RTXDI), 전역 조명(RTXGI), 그림자, 반사를 통합 계산.
+*   **Output**: 노이즈가 포함된 원본 RT 결과물.
+
+#### **4단계: 디노이징 및 최종 합성 (Denoising & Final)**
+*   **Input**: 노이즈 섞인 RT 결과, G-Buffer(정지 정보), Motion Vector(이동 정보).
+*   **Process**: 
+    *   **비동기 컴퓨트(Async Compute)** 또는 일반 컴퓨트 패스에서 SVGF 알고리즘 실행.
+    *   이전 프레임 데이터를 누적하여 노이즈를 제거하고 선명한 결과 도출.
+    *   래스터 결과와 깨끗해진 RT 결과를 물리 법칙에 따라 합성(Compose).
+*   **Final**: 톤 매핑, UI 오버레이 후 화면 출력.
+
+---
+
+## 55. 실시간 디버깅 GUI 통합 (ImGui Integration)
+
+하이브리드 렌더러와 AI 물리 시뮬레이션의 복잡한 파라미터를 실시간으로 제어하기 위해 **ImGui**를 통합함.
+
+### 55.1 ImGui의 역할
+*   **실시간 라이팅 조절**: 직접 조명/전역 조명의 강도와 범위를 즉각적으로 변경.
+*   **AI 물리 튜닝**: 소프트바디의 강성(Stiffness), AI 추론 강도 등을 수치로 제어.
+*   **성능 모니터링**: 각 렌더링 패스(G-Buffer, RT, Denoising)의 소요 시간을 그래프로 확인.
+
+### 55.2 Ogre-Next 컴포지터 통합 (Compositor Sync)
+*   **Pass**: `pass custom imgui`를 컴포지터 노드 끝에 배치하여 최종 화면 위에 GUI가 그려지도록 설정.
+*   **Input**: `VulkanRenderSystem`의 입력 이벤트를 ImGui로 전달하여 마우스/키보드 조작 가능하게 함.
+
+### 55.3 디버깅 체크포인트
+*   **Overlay Pass**: ImGui 패스는 반드시 모든 포스트 프로세스(Post-processing)와 톤 매핑(Tone mapping)이 끝난 뒤에 **sRGB 공간**에서 그려져야 함.
+*   **Depth Test**: GUI는 3D 물체에 가려지지 않도록 항상 `depth_check off` 상태로 렌더링.
+
+---
+
+## 56. GPU 기반 충돌 판정 전략 (GPU Collision Detection)
+
+AI 소프트바디 연산이 컴퓨트 쉐이더에서 일어나므로, 충돌 판정 역시 GPU 내부에서 완결되어야 함.
+
+### 56.1 SDF (Signed Distance Fields) - 정적 환경 충돌
+*   **원리**: 복잡한 정적 메시(건물, 지형 등)를 거대한 3D 텍스처 형태의 SDF 데이터로 미리 변환함.
+*   **판정**: 소프트바디의 각 정점이 SDF 텍스처를 샘플링하여, 값이 0보다 작으면 충돌로 간주하고 밀어냄(Penalty Force).
+*   **장점**: GPU에서 상수 시간(O(1)) 내에 매우 빠르게 충돌을 계산할 수 있음.
+
+### 56.2 Vulkan Ray Queries (KHR_ray_query) - 정밀 충돌
+*   **원리**: 컴퓨트 쉐이더 내에서 직접 **Vulkan 가속 구조(TLAS)**에 광선을 쏘아 충돌 여부를 확인하는 기술.
+*   **판정**: 소프트바디의 정점이 이동할 궤적 방향으로 짧은 광선을 쏴서 다른 물체(동적 객체 포함)와 부딪히는지 체크.
+*   **장점**: 레이트레이싱 하드웨어를 물리 충돌에 그대로 재사용하므로 정밀도가 매우 높음.
+
+### 56.3 충돌-물리 피드백 루프 (Feedback Loop)
+1.  **[Inference]**: AI가 물체의 다음 변형 상태를 예측.
+2.  **[Collision Check]**: SDF 또는 Ray Query를 통해 예측된 위치가 다른 물체를 뚫고 들어갔는지 검사.
+3.  **[Correction]**: 충돌이 감지되면 위치를 보정(Constraint Projection)하거나 반발력을 계산.
+4.  **[Update]**: 최종 보정된 위치를 정점 버퍼에 기록.
+
+---
+**💡 핵심 팁**: 정적인 배경은 **SDF**로 처리하고, 움직이는 캐릭터나 물체 간의 정밀 충돌은 **Vulkan Ray Queries**를 사용하는 하이브리드 충돌 시스템이 PRISM에 가장 적합함!
+
